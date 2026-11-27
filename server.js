@@ -48,6 +48,12 @@ function ownerClaimOk(code) {
 // typo or a wrong URL can never send players somewhere else.
 const _discordRaw = (process.env.DISCORD_INVITE_URL || '').trim();
 const DISCORD_INVITE_URL = /^https:\/\/(discord\.gg\/[A-Za-z0-9_-]+|discord\.com\/invite\/[A-Za-z0-9_-]+)\/?$/.test(_discordRaw) ? _discordRaw : '';
+// Donations button: driven by DONATE_URL (e.g. the owner's Ko-fi link).
+// Only a real http(s) URL is accepted; empty means the button renders as
+// "DONATE — COMING SOON" and links nowhere. No donation URL is ever
+// invented here — Lucas pastes his own link in the env when he's ready.
+const _donateRaw = (process.env.DONATE_URL || '').trim();
+const DONATE_URL = /^https?:\/\/\S+$/.test(_donateRaw) ? _donateRaw : '';
 
 // ---------- DB ----------
 db.exec(`
@@ -77,6 +83,11 @@ CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id
 CREATE TABLE IF NOT EXISTS predictor_ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, created_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_pred_ai_usage_user_time ON predictor_ai_usage(user_id, created_at);
 CREATE TABLE IF NOT EXISTS pin_lockouts (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS leagues (user_id INTEGER PRIMARY KEY, tier INTEGER DEFAULT 0, week_key TEXT DEFAULT '', week_start_worth REAL, last_result TEXT DEFAULT '', last_result_kind TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS league_meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS user_progress (user_id INTEGER PRIMARY KEY, xp INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, last_active_date TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS challenge_claims (user_id INTEGER, date TEXT, key TEXT, xp INTEGER, created_at INTEGER, PRIMARY KEY(user_id, date, key));
+CREATE TABLE IF NOT EXISTS ticker_views (user_id INTEGER, symbol TEXT, date TEXT, created_at INTEGER, PRIMARY KEY(user_id, symbol, date));
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 `);
 // Migrations for v11-era DBs (old file) (same file name was hey-gains.db; also handle new columns)
@@ -343,7 +354,13 @@ async function fetchLiveQuotesFresh(symbols = null) {
       const regEnd = meta.currentTradingPeriod?.regular?.end;
       let trueClose = null;
       if (regEnd) for (let i = ts.length - 1; i >= 0; i--) { if (ts[i] <= regEnd && closes[i] != null) { trueClose = closes[i]; break; } }
-      const spark = closes.filter(c => c != null).slice(-40);
+      // Sparkline = the FULL 1D session, downsampled to 40 evenly spaced
+      // points (first bar = day open area, last = current price), so the
+      // watchlist preview matches the main 1D chart. It used to be
+      // slice(-40) — only the last 40 minutes — which looked nothing like
+      // the day's move and went flat/stale after close.
+      const allCloses = closes.filter(c => c != null);
+      const spark = allCloses.length <= 40 ? allCloses : Array.from({ length: 40 }, (_, k) => allCloses[Math.round(k * (allCloses.length - 1) / 39)]);
       const close4pm = trueClose ?? meta.regularMarketPrice ?? meta.chartPreviousClose ?? null;
       const price = lastBar ? lastBar.price : (meta.regularMarketPrice ?? null);
       if (price == null) throw new Error('no price');
@@ -721,6 +738,7 @@ function applyTrade(uid, symbol, side, shares, price, source) {
       db.prepare('INSERT INTO trades(user_id,symbol,side,shares,price,total,pnl,session,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(uid, symbol, 'buy', shares, price, total, pnl, session, source + '-cover', Date.now());
       const g = getGame(uid);
       if (pnl > 0 && g.best_run < pnl) db.prepare('UPDATE game SET best_run=? WHERE user_id=?').run(pnl, uid);
+      touchActivity(uid); // a trade counts toward the daily streak
       return { ok: true, pnl, covered: true };
     }
     db.prepare('UPDATE game SET cash=cash-? WHERE user_id=?').run(total, uid);
@@ -738,6 +756,7 @@ function applyTrade(uid, symbol, side, shares, price, source) {
       db.prepare('INSERT INTO trades(user_id,symbol,side,shares,price,total,pnl,session,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(uid, symbol, 'sell', shares, price, total, pnl, session, source, Date.now());
       const g = getGame(uid);
       if (pnl > 0 && g.best_run < pnl) db.prepare('UPDATE game SET best_run=? WHERE user_id=?').run(pnl, uid);
+      touchActivity(uid); // a trade counts toward the daily streak
       return { ok: true, pnl };
     }
     // No position, or an existing short: open / increase the short.
@@ -749,8 +768,10 @@ function applyTrade(uid, symbol, side, shares, price, source) {
       db.prepare('UPDATE positions SET shares=?, avg_cost=? WHERE id=?').run(ns, avg, pos.id);
     } else db.prepare('INSERT INTO positions(user_id,symbol,shares,avg_cost,created_at) VALUES(?,?,?,?,?)').run(uid, symbol, -shares, price, Date.now());
     db.prepare('INSERT INTO trades(user_id,symbol,side,shares,price,total,pnl,session,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(uid, symbol, 'sell', shares, price, total, 0, session, source + '-short', Date.now());
+    touchActivity(uid); // a trade counts toward the daily streak
     return { ok: true, pnl: 0, shorted: true };
   }
+  touchActivity(uid); // a buy-long trade counts toward the daily streak
   return { ok: true };
 }
 // Limit / stop orders: evaluated against live quotes on every quote
@@ -927,6 +948,7 @@ async function serverCycle() {
   try {
     const users = db.prepare('SELECT id FROM users').all();
     if (!users.length) return;
+    maybeLeagueRollover(); // weekly leagues roll over even with the page closed
     const quotes = await fetchLiveQuotes(); // shared live quotes for the whole cycle
     const now = Date.now();
     for (const u of users) {
@@ -936,6 +958,7 @@ async function serverCycle() {
       evaluatePings(u.id, effectiveQuotesFor(u.id, quotes));
       evaluateOrders(u.id, effectiveQuotesFor(u.id, quotes)); // limit/stop orders fill on touch
       snapshotNetWorth(u.id); // portfolio-over-time history, ~every cycle
+      ensureLeagueRow(u.id, netWorthOf(u.id, quotes)); // league week snapshot (new players start in Bronze)
     }
     await flushEmailQueue().catch(() => {});
   } catch (e) { console.error('server cycle error', e.message); }
@@ -1062,6 +1085,11 @@ function publicState(uid, opts = {}) {
   // Session hours for display: on an early-close day the regular session
   // ends at 1:00 PM ET, not 4:00 PM — the old hardcoded "9:30 AM–4:00 PM"
   // label lied on those days.
+  // Leagues: read-only here — the row is created/rolled over by the
+  // server cycle, never by a read. Missing row => Bronze defaults.
+  const leagueRow = getLeagueRow(uid);
+  const leagueTier = leagueTierOf(leagueRow);
+  const leagueWeeklyPct = leagueRow?.week_start_worth ? ((netWorth - leagueRow.week_start_worth) / leagueRow.week_start_worth) * 100 : 0;
   const etNow = etDate(new Date());
   const sessionHours = isEarlyClose(etNow.year, etNow.month, etNow.day, etNow.weekday) ? '9:30 AM–1:00 PM ET' : '9:30 AM–4:00 PM ET';
   return {
@@ -1075,6 +1103,7 @@ function publicState(uid, opts = {}) {
     predictorChats: db.prepare('SELECT * FROM predictor_chats WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(uid),
     ...predictorLimitInfo(uid, user), // predictorLimit / Used / Remaining / Unlimited (AI asks only)
     settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), sessionHours, discordInviteUrl: DISCORD_INVITE_URL,
+    league: { tier: leagueTier, tierName: LEAGUE_TIERS[leagueTier].name, tierColor: LEAGUE_TIERS[leagueTier].color, weeklyPct: Math.round(leagueWeeklyPct * 100) / 100, lastResult: leagueRow?.last_result || '', lastResultKind: leagueRow?.last_result_kind || '' }, donateUrl: DONATE_URL,
     feedback: user.is_owner ? db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT 100').all() : undefined,
     players: db.prepare('SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = \'\' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at').all(),
   };
@@ -1089,6 +1118,156 @@ function snapshotNetWorth(uid) {
   const nw = publicState(uid, { updateBest: true }).netWorth;
   db.prepare('INSERT INTO net_worth_snapshots(user_id,net_worth,created_at) VALUES(?,?,?)').run(uid, nw, Date.now());
 }
+
+// ---------- Weekly LEAGUES (Duolingo-style) ----------
+// 10 tiers, lowest to highest. Weekly competition: Monday 00:00 ET to
+// Sunday 23:59 ET, ranked by WEEKLY % return (net worth now vs net worth
+// at the start of the week) — not all-time. Leagues hold up to 30 players
+// in the same tier; new players start in Bronze. At week end the top 10
+// promote, the bottom 10 demote, the middle stays. This is a SEPARATE
+// system from the % ranks (Paper Hands / Rookie / ... / Whale) — those
+// are untouched. No AI involved.
+const LEAGUE_TIERS = [
+  { name: 'Bronze', color: '#cd7f32' },
+  { name: 'Silver', color: '#c0c0c0' },
+  { name: 'Gold', color: '#ffd700' },
+  { name: 'Sapphire', color: '#4f8ef7' },
+  { name: 'Ruby', color: '#e0115f' },
+  { name: 'Emerald', color: '#50c878' },
+  { name: 'Amethyst', color: '#b388ff' },
+  { name: 'Pearl', color: '#f5f0dc' },
+  { name: 'Obsidian', color: '#9aa3b2' },
+  { name: 'Diamond', color: '#7fe7ff' },
+];
+const LEAGUE_SIZE = 30;
+const LEAGUE_PROMOTE = 10; // of a full 30-player league
+const ET_WEEKDAYS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+// Monday (ET) that starts the week containing d, as 'YYYY-MM-DD'.
+function etWeekKey(d = new Date()) {
+  const p = etDate(d);
+  const base = new Date(Date.UTC(p.year, p.month - 1, p.day));
+  const off = (ET_WEEKDAYS[p.weekday] + 6) % 7; // days since Monday
+  base.setUTCDate(base.getUTCDate() - off);
+  return `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, '0')}-${String(base.getUTCDate()).padStart(2, '0')}`;
+}
+// Epoch ms of the next Monday 00:00 ET after the week starting weekKey.
+function etWeekEndsAtMs(weekKey) {
+  const [y, m, dd] = weekKey.split('-').map(Number);
+  const next = new Date(Date.UTC(y, m - 1, dd + 7));
+  return etWallToMs(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), 0, 0);
+}
+// Net worth on ONE shared quote set (raw, no per-player overnight freeze)
+// so every player in a league is ranked on the same prices (M2).
+function netWorthOf(uid, quotes) {
+  const game = getGame(uid);
+  let nw = game.cash;
+  for (const pos of positionsOf(uid)) nw += (quotes[pos.symbol]?.price ?? pos.avg_cost) * pos.shares;
+  return nw;
+}
+function getLeagueRow(uid) { return db.prepare('SELECT * FROM leagues WHERE user_id=?').get(uid); }
+function leagueTierOf(row) { return Math.min(LEAGUE_TIERS.length - 1, Math.max(0, row?.tier || 0)); }
+// Promotion/demotion zone sizes for a league of n players. A full
+// 30-player league promotes/demotes 10; in a smaller league the zones
+// shrink to a third each so they can never overlap (with 3 players: 1 up,
+// 1 down, 1 stays; with 1-2 players: nobody moves).
+function leagueZoneCounts(n) {
+  const c = Math.min(LEAGUE_PROMOTE, Math.floor(n / 3));
+  return { promote: c, demote: c };
+}
+// Week rollover: promote/demote last week's leagues, snapshot everyone at
+// the new week's start. Runs in the server cycle (every 30 s) and lazily
+// from the leagues endpoint, so it fires even with the page closed and
+// even if the server was down at the boundary. Idempotent per week via
+// league_meta.last_rollover_week.
+function maybeLeagueRollover(quotes) {
+  const wk = etWeekKey();
+  const last = db.prepare("SELECT value FROM league_meta WHERE key='last_rollover_week'").get();
+  if (last?.value === wk) return false;
+  const q = quotes || cachedQuotes();
+  const users = db.prepare('SELECT id FROM users ORDER BY created_at').all();
+  const setMeta = () => db.prepare("INSERT INTO league_meta(key,value) VALUES('last_rollover_week',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(wk);
+  if (!users.length) { setMeta(); return false; }
+  if (!last) {
+    // First run ever: seed everyone into the current week. No promotion
+    // or demotion for a week nobody played.
+    for (const u of users) {
+      const nw = netWorthOf(u.id, q);
+      const row = getLeagueRow(u.id);
+      if (!row) db.prepare('INSERT INTO leagues(user_id,tier,week_key,week_start_worth,last_result,last_result_kind) VALUES(?,?,?,?,?,?)').run(u.id, 0, wk, nw, '', '');
+      else if (row.week_key !== wk) db.prepare('UPDATE leagues SET week_key=?, week_start_worth=? WHERE user_id=?').run(wk, nw, u.id);
+    }
+    setMeta(); return true;
+  }
+  // Group by tier. A player whose snapshot is older than the week that
+  // just ended (joined late, or server was down) measures from now, not
+  // from a stale snapshot — they didn't play last week.
+  const byTier = new Map();
+  for (const u of users) {
+    let row = getLeagueRow(u.id);
+    if (!row) { const nw = netWorthOf(u.id, q); db.prepare('INSERT INTO leagues(user_id,tier,week_key,week_start_worth,last_result,last_result_kind) VALUES(?,?,?,?,?,?)').run(u.id, 0, last.value, nw, '', ''); row = getLeagueRow(u.id); }
+    const t = leagueTierOf(row);
+    if (!byTier.has(t)) byTier.set(t, []);
+    const nw = netWorthOf(u.id, q);
+    const start = (row.week_key === last.value && row.week_start_worth) ? row.week_start_worth : nw;
+    byTier.get(t).push({ uid: u.id, nw, weeklyPct: start ? ((nw - start) / start) * 100 : 0 });
+  }
+  for (const [tier, members] of byTier) {
+    members.sort((a, b) => (b.weeklyPct - a.weeklyPct) || (b.nw - a.nw));
+    const { promote, demote } = leagueZoneCounts(members.length);
+    members.forEach((m, i) => {
+      let newTier = tier, kind = 'stayed';
+      if (i < promote && tier < LEAGUE_TIERS.length - 1) { newTier = tier + 1; kind = 'promoted'; }
+      else if (i >= members.length - demote && tier > 0) { newTier = tier - 1; kind = 'demoted'; }
+      const msg = kind === 'promoted' ? `Promoted to ${LEAGUE_TIERS[newTier].name}!` : kind === 'demoted' ? `Demoted to ${LEAGUE_TIERS[newTier].name}` : `Stayed in ${LEAGUE_TIERS[tier].name}`;
+      db.prepare('UPDATE leagues SET tier=?, week_key=?, week_start_worth=?, last_result=?, last_result_kind=? WHERE user_id=?').run(newTier, wk, m.nw, msg, kind, m.uid);
+    });
+  }
+  setMeta(); return true;
+}
+// Ensure a league row exists for a player and belongs to the current
+// week. New players start in Bronze, snapshotted at their current net
+// worth. If the week turned over and no rollover ran yet, roll over first
+// so last week's standings still count.
+function ensureLeagueRow(uid, netWorth) {
+  let row = getLeagueRow(uid);
+  const wk = etWeekKey();
+  if (!row) {
+    db.prepare('INSERT INTO leagues(user_id,tier,week_key,week_start_worth,last_result,last_result_kind) VALUES(?,?,?,?,?,?)').run(uid, 0, wk, netWorth, '', '');
+    return getLeagueRow(uid);
+  }
+  if (row.week_key !== wk) {
+    maybeLeagueRollover();
+    row = getLeagueRow(uid);
+    if (row.week_key !== wk) db.prepare('UPDATE leagues SET week_key=?, week_start_worth=? WHERE user_id=?').run(wk, netWorth, uid);
+    row = getLeagueRow(uid);
+  }
+  return row;
+}
+// Standings for one player's league: same-tier players, chunked into
+// groups of 30 by join order (stable), ranked by weekly % return.
+function leagueStandings(uid, quotes) {
+  const myRow = ensureLeagueRow(uid, netWorthOf(uid, quotes));
+  const tier = leagueTierOf(myRow);
+  const sameTier = db.prepare('SELECT u.id, u.name, u.is_owner, u.created_at FROM users u JOIN leagues l ON l.user_id=u.id WHERE l.tier=? ORDER BY u.created_at').all(tier);
+  const myIdx = sameTier.findIndex(u => u.id === uid);
+  const groupStart = Math.max(0, Math.floor(myIdx / LEAGUE_SIZE) * LEAGUE_SIZE);
+  const group = sameTier.slice(groupStart, groupStart + LEAGUE_SIZE);
+  const rows = group.map(u => {
+    const row = getLeagueRow(u.id);
+    const nw = netWorthOf(u.id, quotes);
+    const start = row?.week_start_worth;
+    const weeklyPct = start ? ((nw - start) / start) * 100 : 0;
+    return { id: u.id, name: u.name, isOwner: !!u.is_owner, netWorth: Math.round(nw * 100) / 100, weeklyPct: Math.round(weeklyPct * 100) / 100 };
+  });
+  rows.sort((a, b) => (b.weeklyPct - a.weeklyPct) || (b.netWorth - a.netWorth) || a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+  const { promote, demote } = leagueZoneCounts(rows.length);
+  return {
+    tier, tierName: LEAGUE_TIERS[tier].name, tierColor: LEAGUE_TIERS[tier].color,
+    leagueSize: rows.length, promoteCount: promote, demoteCount: demote,
+    standings: rows.map((r, i) => ({ rank: i + 1, ...r, isYou: r.id === uid, zone: i < promote ? 'promote' : i >= rows.length - demote ? 'demote' : 'stay' })),
+  };
+}
+
 // Leaderboard rows: public numbers only — name, owner flag, net worth,
 // cash, today + all-time change. Never PINs, tokens, emails or salts.
 function leaderboardRows() {
@@ -1102,7 +1281,8 @@ function leaderboardRows() {
   const r2 = v => Math.round((v || 0) * 100) / 100;
   const rows = users.map(u => {
     const s = publicState(u.id, { quotesOverride: shared, rawQuotes: true });
-    return { name: u.name, isOwner: !!u.is_owner, netWorth: r2(s.netWorth), cash: r2(s.cash), todayChange: r2(s.todayChange), todayPct: r2(s.todayPct), allTime: r2(s.allTime), allTimePct: r2(s.allTimePct) };
+    const lt = s.league?.tier ?? 0;
+    return { name: u.name, isOwner: !!u.is_owner, leagueTier: lt, leagueTierName: LEAGUE_TIERS[lt].name, leagueTierColor: LEAGUE_TIERS[lt].color, netWorth: r2(s.netWorth), cash: r2(s.cash), todayChange: r2(s.todayChange), todayPct: r2(s.todayPct), allTime: r2(s.allTime), allTimePct: r2(s.allTimePct) };
   });
   // Ranked by % return (allTimePct), NOT by dollars: a player who turned
   // $1,000 into $1,050 (+5%) beats one who turned $100,000 into $100,500
@@ -1170,6 +1350,7 @@ function wipeGame(uid, startCash) {
   db.prepare('DELETE FROM net_worth_snapshots WHERE user_id=?').run(uid); // fresh game, fresh history
   db.prepare('UPDATE game SET cash=?, best_run=0, best_worth=? WHERE user_id=?').run(startCash, startCash, uid);
   const s = getSettings(uid); s.autoOn = false; saveSettings(uid, s);
+  db.prepare('UPDATE leagues SET week_start_worth=? WHERE user_id=?').run(startCash, uid); // weekly % measures from the fresh start
   snapshotNetWorth(uid); // seed the new history at the starting amount
 }
 
@@ -1177,7 +1358,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, app: APP_NAME, session
 // Public config — no auth needed (the welcome screen is shown before
 // sign-in). Only exposes the Discord invite URL (empty until configured)
 // plus two booleans the UI uses for its banners/badges.
-app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured() }));
+app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, donateUrl: DONATE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured() }));
 // H6: the sign-in page needs the player list before auth, so this stays
 // public — but it no longer leaks which account is the owner (that flag
 // used to let anyone target the owner account for PIN attacks). has_pin
@@ -1350,6 +1531,23 @@ app.delete('/api/custom-symbols', auth, (req, res) => {
 app.get('/api/state', auth, (req, res) => res.json(publicState(req.user.id)));
 // Leaderboard — read-only, authenticated, public numbers only.
 app.get('/api/leaderboard', auth, (req, res) => res.json({ players: leaderboardRows(), you: req.user.name }));
+app.get('/api/leagues', auth, (req, res) => {
+  maybeLeagueRollover(); // a week boundary while the server was quiet still rolls over on first read
+  const shared = cachedQuotes();
+  // Make sure every player has a current-week row before grouping.
+  for (const u of db.prepare('SELECT id FROM users').all()) ensureLeagueRow(u.id, netWorthOf(u.id, shared));
+  const wk = etWeekKey();
+  const st = leagueStandings(req.user.id, shared);
+  const me = st.standings.find(r => r.isYou);
+  const myRow = getLeagueRow(req.user.id);
+  res.json({
+    tiers: LEAGUE_TIERS, tier: st.tier, tierName: st.tierName, tierColor: st.tierColor,
+    weekKey: wk, weekEndsAt: etWeekEndsAtMs(wk),
+    leagueSize: st.leagueSize, promoteCount: st.promoteCount, demoteCount: st.demoteCount,
+    lastResult: myRow?.last_result || '', lastResultKind: myRow?.last_result_kind || '',
+    you: me || null, standings: st.standings,
+  });
+});
 // Stock chat — a shared discussion feed for all players. Messages are
 // stored verbatim (names and text exactly as sent) and MUST be escaped on
 // render (frontend uses escapeHtml()); the API returns JSON, never HTML,
@@ -1389,6 +1587,162 @@ app.get('/api/portfolio-history', auth, (req, res) => {
 });
 // Achievements + rank — computed from existing trades/game data.
 app.get('/api/achievements', auth, (req, res) => res.json(computeAchievements(req.user.id)));
+
+// ---------- Daily challenges + streaks (Duolingo-style) ----------
+// 3 fresh challenges every ET day, rotated deterministically from a pool
+// of 6, so every player gets the same 3 on the same day. Progress is
+// computed server-side from real rows (trades, Predictor chats, ticker
+// views) — the client can never claim XP it did not earn. XP is awarded
+// once per challenge per day (challenge_claims PK blocks double-claims).
+// Streak = consecutive ET days with at least one challenge or trade;
+// touchActivity() is called on trades, Predictor asks and challenge
+// claims. A missed day resets the streak to 1 on the next active day.
+function etDayKey(d = new Date()) { const e = etDate(d); return `${e.year}-${String(e.month).padStart(2, '0')}-${String(e.day).padStart(2, '0')}`; }
+function etDayNumber(d = new Date()) { const e = etDate(d); return Math.floor(Date.UTC(e.year, e.month - 1, e.day) / 86400000); }
+function dayNumberToKey(n) { const d = new Date(n * 86400000); return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`; }
+function getProgress(uid) {
+  let row = db.prepare('SELECT * FROM user_progress WHERE user_id=?').get(uid);
+  if (!row) { db.prepare('INSERT INTO user_progress(user_id,xp,streak,last_active_date) VALUES(?,?,?,?)').run(uid, 0, 0, ''); row = { user_id: uid, xp: 0, streak: 0, last_active_date: '' }; }
+  return row;
+}
+function touchActivity(uid) {
+  const today = etDayKey();
+  const p = getProgress(uid);
+  if (p.last_active_date === today) return p;
+  const yesterday = dayNumberToKey(etDayNumber() - 1);
+  const streak = p.last_active_date === yesterday ? (p.streak || 0) + 1 : 1;
+  db.prepare('UPDATE user_progress SET streak=?, last_active_date=? WHERE user_id=?').run(streak, today, uid);
+  return { ...p, streak, last_active_date: today };
+}
+const CHALLENGE_POOL = [
+  { key: 'trade-1', title: 'Make 1 trade', desc: 'Buy or sell any ticker today.', xp: 10, goal: 1 },
+  { key: 'day-up-1', title: 'Finish the day up +1%', desc: 'End today at least 1% above where you started it.', xp: 10, goal: 1 },
+  { key: 'predictor-1', title: 'Ask the Predictor a question', desc: 'Ask Verity AI or Rules-only about any ticker.', xp: 10, goal: 1 },
+  { key: 'tickers-3', title: 'Check 3 different tickers', desc: 'Open the chart for 3 different tickers today.', xp: 10, goal: 3 },
+  { key: 'sell-profit', title: 'Sell for a profit', desc: 'Close a trade in the green today.', xp: 10, goal: 1 },
+  { key: 'hold-overnight', title: 'Hold a position overnight', desc: 'Hold a position you opened on an earlier day.', xp: 10, goal: 1 },
+];
+function todaysChallengeKeys(dateKey) {
+  let seed = 0; for (const ch of dateKey) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  const arr = CHALLENGE_POOL.map(c => c.key);
+  for (let i = arr.length - 1; i > 0; i--) { seed = (seed * 1664525 + 1013904223) >>> 0; const j = seed % (i + 1); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+  return arr.slice(0, 3);
+}
+function challengeProgress(uid, key, todayKey, dayStart, dayEnd, st) {
+  switch (key) {
+    case 'trade-1': { const c = db.prepare('SELECT COUNT(*) c FROM trades WHERE user_id=? AND created_at>=? AND created_at<?').get(uid, dayStart, dayEnd).c; return { progress: Math.min(c, 1), goal: 1 }; }
+    case 'day-up-1': { const done = (st?.todayPct || 0) >= 1 ? 1 : 0; return { progress: done, goal: 1 }; }
+    case 'predictor-1': { const c = db.prepare('SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND created_at>=? AND created_at<?').get(uid, dayStart, dayEnd).c; return { progress: Math.min(c, 1), goal: 1 }; }
+    case 'tickers-3': { const c = db.prepare('SELECT COUNT(DISTINCT symbol) c FROM ticker_views WHERE user_id=? AND date=?').get(uid, todayKey).c; return { progress: Math.min(c, 3), goal: 3 }; }
+    case 'sell-profit': { const c = db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND pnl>0 AND created_at>=? AND created_at<? AND ((side='sell') OR (side='buy' AND source LIKE '%-cover'))").get(uid, dayStart, dayEnd).c; return { progress: Math.min(c, 1), goal: 1 }; }
+    case 'hold-overnight': {
+      const open = db.prepare('SELECT COUNT(*) c FROM positions WHERE user_id=? AND created_at<?').get(uid, dayStart).c;
+      const closed = db.prepare("SELECT COUNT(*) c FROM trades t WHERE user_id=? AND t.created_at>=? AND t.created_at<? AND ((t.side='sell' AND t.pnl<>0) OR (t.side='buy' AND t.source LIKE '%-cover')) AND EXISTS (SELECT 1 FROM trades b WHERE b.user_id=t.user_id AND b.symbol=t.symbol AND b.created_at<? AND ((b.side='buy' AND b.source NOT LIKE '%-cover') OR (b.side='sell' AND b.source LIKE '%-short')))").get(uid, dayStart, dayEnd, dayStart).c;
+      return { progress: (open > 0 || closed > 0) ? 1 : 0, goal: 1 };
+    }
+    default: return { progress: 0, goal: 1 };
+  }
+}
+function todaysChallenges(uid) {
+  const e = etDate(); const todayKey = etDayKey(); const [dayStart, dayEnd] = etDayBounds(e.year, e.month, e.day);
+  const st = publicState(uid);
+  const p = getProgress(uid);
+  const claimed = new Set(db.prepare('SELECT key FROM challenge_claims WHERE user_id=? AND date=?').all(uid, todayKey).map(r => r.key));
+  const challenges = todaysChallengeKeys(todayKey).map(k => {
+    const def = CHALLENGE_POOL.find(c => c.key === k);
+    const pr = challengeProgress(uid, k, todayKey, dayStart, dayEnd, st);
+    return { key: k, title: def.title, desc: def.desc, xp: def.xp, goal: pr.goal, progress: pr.progress, done: pr.progress >= pr.goal, claimed: claimed.has(k) };
+  });
+  return { date: todayKey, xp: p.xp, streak: p.streak, lastActiveDate: p.last_active_date, challenges };
+}
+app.get('/api/challenges', auth, (req, res) => res.json(todaysChallenges(req.user.id)));
+app.post('/api/challenges/claim', auth, (req, res) => {
+  const key = req.body?.key;
+  const todayKey = etDayKey();
+  const e = etDate(); const [dayStart, dayEnd] = etDayBounds(e.year, e.month, e.day);
+  if (!todaysChallengeKeys(todayKey).includes(key)) return res.status(400).json({ error: "That is not one of today's challenges" });
+  const def = CHALLENGE_POOL.find(c => c.key === key);
+  const st = publicState(req.user.id);
+  const pr = challengeProgress(req.user.id, key, todayKey, dayStart, dayEnd, st);
+  if (pr.progress < pr.goal) return res.status(400).json({ error: 'Challenge not complete yet — finish it first' });
+  const already = db.prepare('SELECT 1 FROM challenge_claims WHERE user_id=? AND date=? AND key=?').get(req.user.id, todayKey, key);
+  if (already) return res.status(400).json({ error: 'Already claimed — XP was already awarded for this one' });
+  db.prepare('INSERT INTO challenge_claims(user_id,date,key,xp,created_at) VALUES(?,?,?,?,?)').run(req.user.id, todayKey, key, def.xp, Date.now());
+  const p = getProgress(req.user.id);
+  db.prepare('UPDATE user_progress SET xp=? WHERE user_id=?').run((p.xp || 0) + def.xp, req.user.id);
+  touchActivity(req.user.id);
+  res.json({ ok: true, awarded: def.xp, ...todaysChallenges(req.user.id) });
+});
+// Ticker views feed the "Check 3 different tickers" challenge. The client
+// reports a view once per ticker per day; the PK dedupes replays.
+app.post('/api/activity/view', auth, (req, res) => {
+  const sym = String(req.body?.symbol || '').toUpperCase().trim();
+  if (!sym) return res.status(400).json({ error: 'No ticker' });
+  db.prepare('INSERT OR IGNORE INTO ticker_views(user_id,symbol,date,created_at) VALUES(?,?,?,?)').run(req.user.id, sym, etDayKey(), Date.now());
+  res.json({ ok: true });
+});
+
+// ---------- Trade review / Coach (rules) ----------
+// Honest rules analysis only — there is NO AI key on the server, so this
+// is labelled "Coach (rules)" in the UI and never pretends to be AI.
+// Everything comes from real trade rows: entry, exit, size, P&L,
+// timestamps and stop/target settings. It never invents a future price —
+// "you would have made $X more by holding" is NOT computed, because the
+// price 1 day after a sell is not in the DB.
+function computeCoach(uid) {
+  const closed = db.prepare("SELECT * FROM trades WHERE user_id=? AND pnl<>0 AND ((side='sell') OR (side='buy' AND source LIKE '%-cover')) ORDER BY created_at ASC").all(uid);
+  if (!closed.length) return { empty: true, observations: [], stats: null };
+  const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
+  const winRate = Math.round((wins.length / closed.length) * 1000) / 10;
+  const avgWin = wins.length ? wins.reduce((a, t) => a + t.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((a, t) => a + t.pnl, 0) / losses.length : 0; // negative
+  // Holding time: pair each close with the latest earlier open of the
+  // same symbol (a buy for a long sell, a short-open sell for a cover).
+  const opens = db.prepare("SELECT * FROM trades WHERE user_id=? AND ((side='buy' AND source NOT LIKE '%-cover') OR (side='sell' AND source LIKE '%-short')) ORDER BY created_at ASC").all(uid);
+  let holdSum = 0, holdN = 0;
+  for (const c of closed) {
+    const o = [...opens].reverse().find(o => o.symbol === c.symbol && o.created_at < c.created_at);
+    if (o) { holdSum += c.created_at - o.created_at; holdN++; }
+  }
+  const avgHoldHrs = holdN ? holdSum / holdN / 3600000 : null;
+  // Stop discipline: a losing sell counts as "honoured" when the loss is
+  // within ~7% of the trade's exit value — close to the -5% stop line.
+  const losingSells = losses.filter(t => t.side === 'sell');
+  const honoured = losingSells.filter(t => t.total > 0 && (-t.pnl / t.total) <= 0.07).length;
+  // Best / worst ticker by average P&L per closed trade.
+  const bySym = {};
+  for (const t of closed) { (bySym[t.symbol] = bySym[t.symbol] || { n: 0, pnl: 0 }); bySym[t.symbol].n++; bySym[t.symbol].pnl += t.pnl; }
+  const syms = Object.entries(bySym).map(([s, v]) => ({ symbol: s, avg: v.pnl / v.n, n: v.n, total: v.pnl })).sort((a, b) => b.avg - a.avg);
+  const best = syms[0], worst = syms[syms.length - 1];
+  const allTrades = db.prepare('SELECT symbol, COUNT(*) c FROM trades WHERE user_id=? GROUP BY symbol ORDER BY c DESC LIMIT 1').get(uid);
+  const fmt$ = v => '$' + Number(v).toFixed(2);
+  const obs = [];
+  obs.push(`Win rate ${winRate}% — ${wins.length} wins out of ${closed.length} closed trades. Average win ${fmt$(avgWin)}, average loss ${fmt$(avgLoss)}${avgWin && avgLoss ? ` — your wins are ${(avgWin / Math.abs(avgLoss)).toFixed(1)}x the size of your losses.` : '.'}`);
+  if (avgHoldHrs != null) {
+    const holdTxt = avgHoldHrs < 24 ? `${avgHoldHrs.toFixed(1)} hours` : `${(avgHoldHrs / 24).toFixed(1)} days`;
+    obs.push(`You hold trades for ${holdTxt} on average${avgHoldHrs < 24 ? ' — fast in-and-out, a day-trading pace.' : avgHoldHrs < 24 * 7 ? ' — a swing-trading pace.' : ' — a position-trading pace, weeks at a time.'}`);
+  }
+  if (losingSells.length) {
+    const honPct = Math.round((honoured / losingSells.length) * 100);
+    obs.push(honoured === losingSells.length
+      ? `Stop discipline is clean — you honoured your stop on all ${losingSells.length} losing sell${losingSells.length === 1 ? '' : 's'} (losses cut within ~7% of the exit value).`
+      : `Stop discipline: ${honoured} of ${losingSells.length} losing sells (${honPct}%) were cut within ~7% of the exit value — the rest ran past your stop line. Cutting sooner on those would have kept the losses smaller.`);
+  } else {
+    obs.push('No losing sells yet — every closed trade so far is a win. The stop line has not been tested.');
+  }
+  if (best && worst && best.symbol !== worst.symbol) {
+    obs.push(`Best ticker: ${best.symbol} (${fmt$(best.avg)} average per closed trade, ${best.n} trade${best.n === 1 ? '' : 's'}). Worst ticker: ${worst.symbol} (${fmt$(worst.avg)} average per closed trade, ${worst.n} trade${worst.n === 1 ? '' : 's'}).`);
+  } else if (best) {
+    obs.push(`Best (and only) ticker so far: ${best.symbol} (${fmt$(best.avg)} average per closed trade). Try another ticker to compare.`);
+  }
+  if (allTrades) obs.push(`Most traded ticker: ${allTrades.symbol} (${allTrades.c} trade${allTrades.c === 1 ? '' : 's'}).`);
+  return {
+    empty: false,
+    observations: obs.slice(0, 5),
+    stats: { closed: closed.length, wins: wins.length, losses: losses.length, winRate, avgWin: Math.round(avgWin * 100) / 100, avgLoss: Math.round(avgLoss * 100) / 100, avgHoldHrs: avgHoldHrs == null ? null : Math.round(avgHoldHrs * 10) / 10, stopHonoured: honoured, stopTotal: losingSells.length, best, worst },
+  };
+}
+app.get('/api/coach', auth, (req, res) => res.json(computeCoach(req.user.id)));
 app.post('/api/trade', auth, async (req, res) => {
   const { symbol, side, shares } = req.body || {};
   if (!boardSymbols(req.user.id).all.includes(symbol) || !['buy', 'sell'].includes(side) || !(shares > 0)) return res.status(400).json({ error: 'Bad trade' });
@@ -1451,7 +1805,7 @@ app.post('/api/account/delete', auth, (req, res) => {
   if (req.user.is_owner) return res.status(403).json({ error: 'The owner account cannot be deleted — it runs the feedback inbox and player list for everyone else.' });
   if (!req.user || !verifyPin(String(pin || ''), req.user)) return res.status(401).json({ error: 'Wrong PIN — account not deleted.' });
   const uid = req.user.id;
-  for (const t of ['positions', 'trades', 'predictor_chats', 'predictor_ai_usage', 'alerts', 'auto_log', 'email_queue', 'settings', 'custom_symbols', 'email_verifications', 'net_worth_snapshots', 'orders', 'chat_messages', 'game', 'sessions', 'pin_lockouts']) db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
+  for (const t of ['positions', 'trades', 'predictor_chats', 'predictor_ai_usage', 'alerts', 'auto_log', 'email_queue', 'settings', 'custom_symbols', 'email_verifications', 'net_worth_snapshots', 'orders', 'chat_messages', 'game', 'sessions', 'pin_lockouts', 'user_progress', 'challenge_claims', 'ticker_views', 'leagues']) db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
   db.prepare('DELETE FROM feedback WHERE user_id=?').run(uid);
   db.prepare('DELETE FROM users WHERE id=?').run(uid);
   res.json({ ok: true });
@@ -1527,6 +1881,7 @@ app.post('/api/predictor', auth, async (req, res) => {
   let answer = ai || `${symbol} — ${outlook} (${confidence}% confidence).\n${keyPoints.join('\n')}\nRisks: ${risks.join('; ')}.\nTimeframe: ${timeframe}.\n${mode === 'rules' ? '(Rules-only answer — no AI used, unlimited questions.)' : '(AI research unavailable — no AI_API_KEY configured; answer is rules-based from live price, trend and news.)'}`;
   db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,mode,outlook_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), mode, outlookSource, Date.now());
   if (mode === 'ai') db.prepare('INSERT INTO predictor_ai_usage(user_id,created_at) VALUES(?,?)').run(req.user.id, Date.now()); // C4: append-only usage ledger
+  touchActivity(req.user.id); // asking the Predictor counts toward the daily streak
   res.json({ outlook, confidence, outlookSource, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, predictorMode: mode, ...predictorLimitInfo(req.user.id, req.user), state: publicState(req.user.id) });
 });
 // How many of today's 2 AI questions a standard member has left.
