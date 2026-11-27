@@ -19,8 +19,8 @@
   <div class="welcome-card">
     <p class="eyebrow">HeyGains · Stock Trading Simulator</p>
     <h1>REAL PRICES. FAKE MONEY. ALL YOURS TO PLAY.</h1>
-    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Start with $100,000 of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the Verity AI Predictor, get buy/sell pings, and let the auto trader run 24/7. No real money, no real orders.</p>
-    <div class="stat-chips"><span id="welcome-stat-cash">$100K</span><span>12 default tickers</span><span>24/7</span></div>
+    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Choose your amount of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the Verity AI Predictor, get buy/sell pings, and let the auto trader run 24/7. No real money, no real orders.</p>
+    <div class="stat-chips"><span id="welcome-stat-cash">YOU CHOOSE</span><span>12 default tickers</span><span>runs 24/7</span></div>
     <div class="row">
       <button id="btn-welcome-create" class="btn primary big">CREATE MY ACCOUNT</button>
       <button id="btn-welcome-signin" class="btn big">I ALREADY HAVE ONE</button>
@@ -39,7 +39,7 @@
     </ul>
     <h3>HOW IT WORKS</h3>
     <div class="steps">
-      <div><b>1 · CREATE YOUR ACCOUNT</b>Pick a name and a PIN. Your game is yours alone.</div>
+      <div><b>1 · CREATE YOUR ACCOUNT</b>Pick a name, a PIN, and how much fake cash you start with.</div>
       <div><b>2 · TRADE THE BOARD</b>Buy and sell the 12 default tickers — or add more of your own stocks and crypto.</div>
       <div><b>3 · LET IT RUN</b>Turn on pings and the auto trader and let HeyGains watch the market 24/7.</div>
     </div>
@@ -78,6 +78,10 @@
     <label>PIN <input id="auth-pin" type="password" placeholder="PIN (4+ characters)" autocomplete="current-password"></label>
     <div id="auth-email-wrap">
       <label>Email for pings (optional) <input id="auth-email" type="email" placeholder="you@example.com — we'll send a 6-digit code"></label>
+    </div>
+    <div id="auth-startcash-wrap">
+      <label>Choose your amount of fake cash <input id="auth-startcash" type="number" min="100" max="10000000" step="100" value="100000" inputmode="numeric"></label>
+      <p class="muted small">$100–$10,000,000. This is the fake cash your game starts with.</p>
     </div>
     <div class="row">
       <button id="btn-auth-go" class="btn primary big">SIGN IN</button>
@@ -279,6 +283,8 @@
     <div class="card">
       <h2>STOCK PREDICTOR · VERITY AI <span id="pred-ai-badge" class="tag amber hidden">Rules-only mode — no AI key</span></h2>
       <p class="muted">Ask about a ticker. It reads the live price, recent closes and fresh news, then gives an outlook — Bullish, Bearish, Neutral or Mixed — with confidence, key points and risks.</p>
+      <div class="row" id="pred-mode-picker"><button id="pred-mode-ai" class="btn primary small">VERITY AI</button><button id="pred-mode-rules" class="btn small">RULES ONLY</button><span id="pred-limit" class="muted small"></span></div>
+      <p class="muted small">Verity AI answers use the AI — standard members get 2 a day. Rules-only answers are unlimited and never count toward the limit.</p>
       <div class="ticker-chips" id="pred-chips"></div>
       <p id="pred-current" class="muted"></p>
       <div id="pred-suggestions">
@@ -397,7 +403,7 @@
       <p id="set-feedback-msg" class="muted"></p>
     </div>
     <div class="card"><h3>ABOUT &amp; DANGER ZONE</h3>
-      <p class="muted small">What is HeyGains? HeyGains is a paper trading simulator created by Lucas Do — real live prices, fake money, no real orders. Start with $100,000 of fake cash (or pick your own starting amount), trade 12 tickers plus your own stocks and crypto, get pings and Predictor answers, and let the auto trader run 24/7.</p>
+      <p class="muted small">What is HeyGains? HeyGains is a paper trading simulator created by Lucas Do — real live prices, fake money, no real orders. Choose your amount of fake cash, trade 12 tickers plus your own stocks and crypto, get pings and Predictor answers, and let the auto trader run 24/7.</p>
       <div class="row"><button id="btn-reset2" class="btn small danger">Reset my game</button></div>
       <h3>Delete account</h3>
       <div id="delete-row"></div>
@@ -408,7 +414,7 @@
 
 <footer>
   <p><strong>THE GAME</strong></p>
-  <p>HeyGains starts you with $100,000 of fake cash (or pick your own starting amount) and real live quotes for 12 tickers plus your own stocks and crypto, refreshing every 10 seconds. Trading never closes — you can buy and sell in any session, at the live extended price, never the close. The guardrails are −5% stop / +10% target, the Predictor answers your questions, buy/sell pings watch your lines, and the Auto Trader can run the whole thing 24/7. Paper trading only — no real money, no real orders.</p>
+  <p>HeyGains lets you choose your amount of fake cash and gives you real live quotes for 12 tickers plus your own stocks and crypto, refreshing every 10 seconds. Trading never closes — you can buy and sell in any session, at the live extended price, never the close. The guardrails are −5% stop / +10% target, the Predictor answers your questions, buy/sell pings watch your lines, and the Auto Trader can run the whole thing 24/7. Paper trading only — no real money, no real orders.</p>
   <p id="footer-best-run" class="muted"></p>
   <div class="row" style="justify-content:center"><button id="btn-footer-what" class="btn small">What is HeyGains?</button></div>
   <p>Created by Lucas Do</p>

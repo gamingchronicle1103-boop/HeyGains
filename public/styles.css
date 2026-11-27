@@ -26,12 +26,19 @@ body{margin:0;font-family:var(--font);background:var(--bg);color:var(--text);fon
 a{color:var(--accent)}
 ::selection{background:var(--accent-glow)}
 h1,h2,h3{font-family:var(--display);font-weight:400;letter-spacing:.01em;margin-top:0}
-@keyframes flash-up{0%{background:rgba(43,255,136,.35)}100%{background:transparent}}
-@keyframes flash-down{0%{background:rgba(255,71,87,.35)}100%{background:transparent}}
+@keyframes flash-up{0%{background:rgba(43,255,136,.4);color:#5cff9d;box-shadow:0 0 0 2px rgba(43,255,136,.35)}45%{background:rgba(43,255,136,.18);color:#5cff9d}100%{background:transparent;box-shadow:none}}
+@keyframes flash-down{0%{background:rgba(255,71,87,.4);color:#ff6b7a;box-shadow:0 0 0 2px rgba(255,71,87,.35)}45%{background:rgba(255,71,87,.18);color:#ff6b7a}100%{background:transparent;box-shadow:none}}
+@keyframes flash-pop{0%{transform:scale(1)}35%{transform:scale(1.07)}100%{transform:scale(1)}}
 @keyframes ticker-in{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
 @keyframes sidebar-in{from{transform:translateX(-102%)}to{transform:translateX(0)}}
-.flash-up{animation:flash-up .7s ease-out}
-.flash-down{animation:flash-down .7s ease-out}
+/* Number-change flash: green up / red down. Background + text colour +
+   glow pulse, plus a small scale pop on inline numbers. The pop only
+   applies to elements that can transform safely (inline-block spans);
+   block numbers get the colour/glow pulse only. */
+.flash-up{animation:flash-up .9s ease-out}
+.flash-down{animation:flash-down .9s ease-out}
+.flash-pop{animation:flash-pop .45s ease-out}
+.flash-inline{display:inline-block;border-radius:4px;padding:0 3px}
 
 /* ---------- Top live bar + scoreboard ---------- */
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 18px;background:rgba(6,9,10,.95);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:40;flex-wrap:wrap}

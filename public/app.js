@@ -13,7 +13,31 @@ let token = localStorage.getItem('verityinvest-token') || '';
 let state = null, quotes = {}, chartData = null, chartMode = 'line', chartRange = '1D', chartSymbol = 'NVDA', showMA20 = false;
 let tradeSide = 'buy', orderSide = 'buy', lastChartLoad = 0, lastNewsLoad = 0, refreshTimer = null, newsTimer = null;
 let notifiedIds = new Set(), prevPrices = {}, bannerAlertId = null, authMode = 'signin', claimName = '';
-let wlSearch = '', wlSort = 'default', tradeInFlight = false;
+let wlSearch = '', wlSort = 'default', tradeInFlight = false, predMode = 'ai';
+// Predictor daily limit (AI mode only): standard members get 2 Verity AI
+// questions per ET day; rules-only questions are unlimited and never
+// counted; the owner is unlimited in both modes. updatePredLimit() keeps
+// the "X / 2 AI questions left today" line and the ASK button in sync —
+// when the AI limit is hit the AI path is blocked, but switching to
+// Rules only re-enables ASK (the whole button is never disabled).
+function updatePredLimit() {
+  const el = $('pred-limit'); if (!el || !state) return;
+  const btn = $('btn-ask');
+  const setModeButtons = () => {
+    const ai = $('pred-mode-ai'), ru = $('pred-mode-rules');
+    if (ai) ai.classList.toggle('primary', predMode === 'ai');
+    if (ru) ru.classList.toggle('primary', predMode === 'rules');
+  };
+  setModeButtons();
+  if (state.user.isOwner) {
+    el.textContent = 'Unlimited AI questions — owner. Rules-only questions are unlimited for everyone.';
+    if (btn) btn.disabled = false;
+    return;
+  }
+  const left = state.predictorRemaining ?? 2;
+  el.textContent = `${left} / 2 AI questions left today · Rules-only questions are unlimited.`;
+  if (btn) btn.disabled = predMode === 'ai' && left <= 0;
+}
 // Device-only sign-in: the server lists EVERY player, but this device only
 // shows the accounts that were created or signed in on THIS browser.
 // Names are kept in localStorage (verityinvest-device-accounts) — a
@@ -64,6 +88,43 @@ function safeUrl(u) { try { const p = new URL(String(u || ''), location.origin);
 const $ = id => document.getElementById(id);
 const money = n => '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
 const pct = (n, s = false) => (n >= 0 ? '+' : '') + Number(n || 0).toFixed(2) + '%';
+// ---------- Number-change flash ----------
+// Generic helper: every money/price number that moves flashes green when
+// it goes up and red when it goes down. flashNum(el, newValue, text)
+// sets the element's text, compares against the last value shown for
+// that element, and re-triggers the .flash-up/.flash-down animation.
+// flashEl(el, key, newValue) does the same compare+flash without touching
+// the text (for elements whose content is HTML). First paint (no previous
+// value) never flashes.
+const _prevNum = new Map();
+function flashEl(el, key, newVal) {
+  if (!el) return;
+  const prev = _prevNum.get(key);
+  _prevNum.set(key, newVal);
+  if (prev == null || prev === newVal) return;
+  el.classList.remove('flash-up', 'flash-down', 'flash-pop');
+  void el.offsetWidth; // restart the animation
+  el.classList.add(newVal > prev ? 'flash-up' : 'flash-down');
+  if (el.classList.contains('flash-inline')) el.classList.add('flash-pop');
+}
+function flashNum(el, newVal, text) {
+  if (!el) return;
+  el.textContent = text;
+  flashEl(el, el.id || el, newVal);
+}
+// Same, for spans rebuilt by innerHTML (positions, leaderboard rows):
+// compare a numeric value against a stored map and flash the span.
+function flashSpan(el, key, newVal, store) {
+  if (!el) return;
+  const prev = store.get(key);
+  store.set(key, newVal);
+  if (prev == null || prev === newVal) return;
+  el.classList.remove('flash-up', 'flash-down', 'flash-pop');
+  void el.offsetWidth;
+  el.classList.add(newVal > prev ? 'flash-up' : 'flash-down');
+  el.classList.add('flash-pop');
+}
+const _prevPos = new Map(), _prevLb = new Map();
 const fmtTime = ts => new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 const fmtDT = ts => new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 function accent() { return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2bff88'; }
@@ -178,13 +239,15 @@ async function loadState() {
   state = await api('/api/state');
   applyDiscordLinks(state.discordInviteUrl || '');
   $('user-line').textContent = 'Playing as ' + state.user.name + (state.user.isOwner ? ' · OWNER' : '');
-  $('net-worth-big').textContent = money(state.netWorth);
+  flashNum($('net-worth-big'), state.netWorth, money(state.netWorth));
   $('net-worth-sub').innerHTML = `All-time <b class="${state.allTime >= 0 ? 'up' : 'down'}">${state.allTime >= 0 ? '+' : ''}${money(state.allTime)} (${pct(state.allTimePct)})</b> · Best worth <b>${money(state.bestWorth || state.netWorth)}</b>`;
-  $('score-cash').textContent = money(state.cash);
+  flashEl($('net-worth-sub'), 'net-worth-sub', state.netWorth);
+  flashNum($('score-cash'), state.cash, money(state.cash));
   $('score-cash-sub').textContent = 'Available to trade';
-  $('score-today').textContent = (state.todayChange >= 0 ? '+' : '') + money(state.todayChange);
+  // Set the up/down class BEFORE flashing, so the flash class survives.
   $('score-today').className = 'score-val ' + (state.todayChange >= 0 ? 'up' : 'down');
-  $('score-today-sub').textContent = pct(state.todayPct) + ' today on holdings';
+  flashNum($('score-today'), state.todayChange, (state.todayChange >= 0 ? '+' : '') + money(state.todayChange));
+  flashNum($('score-today-sub'), state.todayPct, pct(state.todayPct) + ' today on holdings');
   $('score-session').textContent = sessionDisplay(state.session);
   $('score-session-sub').textContent = state.session === 'Open' ? 'Regular session · 9:30 AM–4:00 PM ET' : 'Trading stays open — fills at the live extended price';
   const sb = $('session-badge'); sb.textContent = sessionDisplay(state.session); sb.className = 'badge ' + sessionBadgeClass(state.session);
@@ -194,7 +257,7 @@ async function loadState() {
     : 'Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the 4 PM close. When overnight prices are off, your game freezes at the 4 PM close outside market hours instead.';
   $('trade-session-banner').textContent = 'Session: ' + sessionDisplay(state.session) + ' — trading never closes. You fill at the LIVE extended price, never the close.';
   $('footer-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : '';
-  renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges();
+  renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges(); updatePredLimit();
   const wc = $('welcome-stat-cash'); if (wc) wc.textContent = fmtCashShort(state.settings.startCash || 100000);
   const unread = state.alerts.filter(a => !a.read).length;
   $('ping-count').textContent = unread; $('ping-count').classList.toggle('hidden', !unread);
@@ -280,7 +343,18 @@ async function loadExtras(force) {
 function leaderboardRowsHtml(players, you, limit) {
   const rows = (players || []).slice(0, limit || players.length);
   if (!rows.length) return '<p class="muted">No players yet.</p>';
-  return rows.map(p => `<div class="lb-row"><span class="lb-rank">#${p.rank}</span><span class="lb-name"><strong>${escapeHtml(p.name)}</strong>${p.isOwner ? ' <span class="tag green">OWNER</span>' : ''}${p.name === you ? ' <span class="tag">YOU</span>' : ''}</span><span class="lb-pct-main ${p.allTimePct >= 0 ? 'up' : 'down'}">${pct(p.allTimePct)}</span><span class="lb-worth">${money(p.netWorth)}</span><span class="lb-pct lb-today ${p.todayPct >= 0 ? 'up' : 'down'}">${pct(p.todayPct)} today</span></div>`).join('');
+  return rows.map(p => `<div class="lb-row"><span class="lb-rank">#${p.rank}</span><span class="lb-name"><strong>${escapeHtml(p.name)}</strong>${p.isOwner ? ' <span class="tag green">OWNER</span>' : ''}${p.name === you ? ' <span class="tag">YOU</span>' : ''}</span><span class="lb-pct-main flash-inline ${p.allTimePct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:pct">${pct(p.allTimePct)}</span><span class="lb-worth flash-inline" data-lb="${escapeHtml(p.name)}:worth">${money(p.netWorth)}</span><span class="lb-pct lb-today flash-inline ${p.todayPct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:today">${pct(p.todayPct)} today</span></div>`).join('');
+}
+// Flash leaderboard numbers when they move between refreshes.
+function flashLeaderboard(el) {
+  if (!el || !leaderboardData) return;
+  el.querySelectorAll('[data-lb]').forEach(s => {
+    const idx = s.dataset.lb.lastIndexOf(':');
+    const name = s.dataset.lb.slice(0, idx), kind = s.dataset.lb.slice(idx + 1);
+    const p = (leaderboardData.players || []).find(x => x.name === name); if (!p) return;
+    const v = kind === 'worth' ? p.netWorth : kind === 'today' ? p.todayPct : p.allTimePct;
+    flashSpan(s, name + ':' + kind, v, _prevLb);
+  });
 }
 // ---------- Stock chat ----------
 async function loadChat() {
@@ -322,10 +396,12 @@ async function postChat() {
 function renderLeaderboard() {
   const el = $('leaderboard-list'); if (!el || !leaderboardData) return;
   el.innerHTML = leaderboardRowsHtml(leaderboardData.players, leaderboardData.you);
+  flashLeaderboard(el);
 }
 function renderWelcomeLeaderboard() {
   const el = $('welcome-leaderboard'); if (!el || !leaderboardData) return;
   el.innerHTML = leaderboardRowsHtml(leaderboardData.players, leaderboardData.you, 5);
+  flashLeaderboard(el);
 }
 function renderAchievements() {
   const rankEl = $('achievements-rank'), listEl = $('achievements-list');
@@ -646,8 +722,8 @@ function updateTradeEstimates() {
   renderQuickSize();
   if (!q) { $('trade-est').textContent = 'Waiting for a live price…'; $('trade-cash-after').textContent = ''; $('trade-position-line').textContent = ''; return; }
   const total = shares * q.price;
-  $('trade-est').textContent = tradeSide === 'buy' ? `Est. cost: ${money(total)} (${shares} × ${money(q.price)})` : `Est. proceeds: ${money(total)} (${shares} × ${money(q.price)})`;
-  $('trade-cash-after').textContent = 'Cash after: ' + money(tradeSide === 'buy' ? state.cash - total : state.cash + total);
+  flashNum($('trade-est'), total, tradeSide === 'buy' ? `Est. cost: ${money(total)} (${shares} × ${money(q.price)})` : `Est. proceeds: ${money(total)} (${shares} × ${money(q.price)})`);
+  flashNum($('trade-cash-after'), tradeSide === 'buy' ? state.cash - total : state.cash + total, 'Cash after: ' + money(tradeSide === 'buy' ? state.cash - total : state.cash + total));
   const pos = heldPosition(chartSymbol);
   if (!pos) $('trade-position-line').textContent = 'You hold no ' + chartSymbol + ' yet. SELL opens a short — you profit if the price falls; BUY while short covers it.';
   else if (pos.shares < 0) $('trade-position-line').textContent = `You SHORT ${Math.abs(pos.shares)} shares @ ${money(pos.avg_cost)} avg short price · unrealized ${pos.changePct >= 0 ? '+' : ''}${pos.changePct.toFixed(2)}% (${money((pos.avg_cost - q.price) * Math.abs(pos.shares))}) · BUY covers it${shares > Math.abs(pos.shares) && tradeSide === 'buy' ? ` — you only short ${Math.abs(pos.shares)}, covering more is not allowed` : ''}.`;
@@ -732,8 +808,14 @@ function renderPositions() {
     const stopHit = p.changePct <= -5 || p.changePct <= style.stop, targetHit = p.changePct >= 10 || p.changePct >= style.target;
     const flag = stopHit ? '<span class="tag red">STOP HIT</span>' : targetHit ? '<span class="tag green">TARGET HIT</span>' : '';
     const shortTag = isShort ? '<span class="tag red">SHORT</span>' : '';
-    return `<div class="pos-row"><strong>${escapeHtml(p.symbol)}</strong> ${shortTag} ${flag}<br><span class="muted">${isShort ? `Short ${Math.abs(p.shares)} shares @ ${money(p.avg_cost)} short avg · exposure ${money(Math.abs(mv))}` : `Market value ${money(mv)} · ${p.shares} shares @ ${money(p.avg_cost)} avg`}</span><br><span class="${p.changePct >= 0 ? 'up' : 'down'}">Unrealized ${money(unrl)} (${pct(p.changePct)})</span><br><span class="muted small">your lines: stop ${money(stopPrice)} · target ${money(targetPrice)} · −5% ${money(line5)} · +10% ${money(line10)}</span> <button class="btn small" data-open="${escapeHtml(p.symbol)}">Open ${escapeHtml(p.symbol)} →</button></div>`;
+    return `<div class="pos-row"><strong>${escapeHtml(p.symbol)}</strong> ${shortTag} ${flag}<br><span class="muted">${isShort ? `Short ${Math.abs(p.shares)} shares @ ${money(p.avg_cost)} short avg · exposure <span class="pos-mv flash-inline" data-pos-flash data-sym="${escapeHtml(p.symbol)}" data-kind="mv">${money(Math.abs(mv))}</span>` : `Market value <span class="pos-mv flash-inline" data-pos-flash data-sym="${escapeHtml(p.symbol)}" data-kind="mv">${money(mv)}</span> · ${p.shares} shares @ ${money(p.avg_cost)} avg`}</span><br><span class="pos-unrl flash-inline ${p.changePct >= 0 ? 'up' : 'down'}" data-pos-flash data-sym="${escapeHtml(p.symbol)}" data-kind="unrl">Unrealized ${money(unrl)} (${pct(p.changePct)})</span><br><span class="muted small">your lines: stop ${money(stopPrice)} · target ${money(targetPrice)} · −5% ${money(line5)} · +10% ${money(line10)}</span> <button class="btn small" data-open="${escapeHtml(p.symbol)}">Open ${escapeHtml(p.symbol)} →</button></div>`;
   }).join('');
+  // Flash market value / unrealized P&L when they move since last render.
+  el.querySelectorAll('[data-pos-flash]').forEach(s => {
+    const p = (state?.positions || []).find(x => x.symbol === s.dataset.sym); if (!p) return;
+    const v = s.dataset.kind === 'mv' ? p.price * p.shares : (p.price - p.avg_cost) * p.shares;
+    flashSpan(s, s.dataset.sym + ':' + s.dataset.kind, v, _prevPos);
+  });
   el.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { chartSymbol = b.dataset.open; $('trade-symbol').value = chartSymbol; gotoTab('trade'); loadChart(); renderWatchlist(); });
 }
 function renderTrades() {
@@ -863,12 +945,24 @@ function renderPredHistory() {
 async function askPredictor() {
   const q = $('pred-q').value.trim();
   if (!q) { $('pred-answer').textContent = 'Ask a question first — or tap one of the suggestion chips.'; return; }
+  if (predMode === 'ai' && !state?.user?.isOwner && (state?.predictorRemaining ?? 2) <= 0) {
+    $('pred-answer').textContent = 'Daily Predictor limit reached — 2 AI questions a day for standard members. Come back tomorrow. (Rules-only questions are unlimited — tap RULES ONLY above.)';
+    return;
+  }
   $('pred-answer').innerHTML = '<p class="muted">Asking the Predictor…</p>';
   try {
-    const j = await api('/api/predictor', { method: 'POST', body: JSON.stringify({ symbol: chartSymbol, question: q }) });
-    $('pred-answer').innerHTML = `<div class="pred-card"><p><span class="chip ${j.outlook === 'Bullish' ? 'buy' : j.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(j.outlook)}</span> <strong>${escapeHtml(chartSymbol)}</strong> · ${escapeHtml(j.timeframe || '')} · price at ask ${money(j.priceAtAsk || 0)}</p><p>${escapeHtml(j.answer)}</p><p>CONFIDENCE ${Number(j.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(j.confidence) || 0}%"></i></div>${(j.keyPoints || []).length ? '<p><strong>Key points</strong></p><ul>' + j.keyPoints.map(k => `<li>${escapeHtml(k)}</li>`).join('') + '</ul>' : ''}${(j.risks || []).length ? `<p class="muted small">Risks: ${escapeHtml(j.risks.join('; '))}</p>` : ''}</div>`;
-    state = j.state; renderPredHistory(); loadExtras(true); // track record gains a new (pending) call
-  } catch (e) { $('pred-answer').textContent = 'Predictor failed: ' + e.message; }
+    const j = await api('/api/predictor', { method: 'POST', body: JSON.stringify({ symbol: chartSymbol, question: q, mode: predMode }) });
+    if (j.predictorRemaining != null) state.predictorRemaining = j.predictorRemaining;
+    if (j.predictorUsed != null) state.predictorUsed = j.predictorUsed;
+    updatePredLimit();
+    $('pred-answer').innerHTML = `<div class="pred-card"><p><span class="chip ${j.outlook === 'Bullish' ? 'buy' : j.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(j.outlook)}</span> <strong>${escapeHtml(chartSymbol)}</strong> · ${escapeHtml(j.timeframe || '')} · price at ask ${money(j.priceAtAsk || 0)}${j.predictorMode === 'rules' ? ' · <span class="tag">RULES ONLY</span>' : ''}</p><p>${escapeHtml(j.answer)}</p><p>CONFIDENCE ${Number(j.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(j.confidence) || 0}%"></i></div>${(j.keyPoints || []).length ? '<p><strong>Key points</strong></p><ul>' + j.keyPoints.map(k => `<li>${escapeHtml(k)}</li>`).join('') + '</ul>' : ''}${(j.risks || []).length ? `<p class="muted small">Risks: ${escapeHtml(j.risks.join('; '))}</p>` : ''}</div>`;
+    state = j.state; renderPredHistory(); updatePredLimit(); loadExtras(true); // track record gains a new (pending) call
+  } catch (e) {
+    // A 429 means the AI daily limit was hit — the server did not record
+    // the ask. Rules-only still works: switch modes and ask again.
+    if (/Daily Predictor limit/i.test(e.message) && state) { state.predictorRemaining = 0; updatePredLimit(); }
+    $('pred-answer').textContent = 'Predictor failed: ' + e.message;
+  }
 }
 
 // ---------- AUTO ----------
@@ -913,7 +1007,7 @@ function updateAutoUI() {
   const today = new Date().toISOString().slice(0, 10);
   const tradesToday = state.trades.filter(t => (t.source || '').startsWith('auto') && new Date(t.created_at).toISOString().slice(0, 10) === today).length;
   const modeLabel = s.autoMode === 'ai' ? 'Verity AI' : 'Rules only';
-  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
+  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Server cycle: <b>runs 24/7</b> — even with this page closed<br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
   $('auto-status').innerHTML = statusHtml;
 }
 function renderAutoLog() {
@@ -984,6 +1078,7 @@ function showAuth(mode) {
   $('auth-mode-signin').classList.toggle('active', authMode === 'signin');
   $('auth-mode-new').classList.toggle('active', authMode === 'new');
   $('auth-email-wrap').classList.toggle('hidden', authMode === 'signin');
+  $('auth-startcash-wrap').classList.toggle('hidden', authMode === 'signin');
   $('btn-auth-go').textContent = authMode === 'signin' ? 'SIGN IN' : 'CREATE MY ACCOUNT';
 }
 function enterApp() {
@@ -1045,6 +1140,12 @@ $('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') postCh
 // Predictor
 document.querySelectorAll('.sugg-chip').forEach(c => c.onclick = () => { $('pred-q').value = c.dataset.q; });
 $('btn-ask').onclick = askPredictor;
+// Predictor mode picker: Verity AI (2/day for standard members) vs
+// Rules only (unlimited). Switching to Rules only re-enables ASK even
+// when the AI limit is hit.
+const _setPredMode = m => { predMode = m; updatePredLimit(); };
+const _pmAi = $('pred-mode-ai'); if (_pmAi) _pmAi.onclick = () => _setPredMode('ai');
+const _pmRu = $('pred-mode-rules'); if (_pmRu) _pmRu.onclick = () => _setPredMode('rules');
 $('btn-clear-pred').onclick = async () => { await api('/api/predictor', { method: 'DELETE' }); $('pred-history').innerHTML = ''; $('pred-answer').innerHTML = ''; await loadState(); };
 // Steppers (all tabs share the same handler)
 document.querySelectorAll('[data-stepper]').forEach(b => b.onclick = async () => {
@@ -1173,7 +1274,7 @@ async function tryAuth(path, body) {
   } catch (e) { $('auth-error').textContent = e.message; }
 }
 $('btn-auth-go').onclick = () => {
-  if (authMode === 'new') tryAuth('/api/auth/register', { name: $('auth-name').value, pin: $('auth-pin').value, email: $('auth-email').value });
+  if (authMode === 'new') tryAuth('/api/auth/register', { name: $('auth-name').value, pin: $('auth-pin').value, email: $('auth-email').value, startCash: Number($('auth-startcash').value) || 100000 });
   else tryAuth('/api/auth/login', { name: $('auth-name').value, pin: $('auth-pin').value });
 };
 $('btn-verify').onclick = async () => { if (await verifyCode($('verify-code').value, 'verify-msg')) { enterApp(); try { await refreshAll(); $('app-loading').classList.add('hidden'); } catch {} } };

@@ -72,6 +72,7 @@ try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN price_at_ask REAL DEFAULT 
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN timeframe TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN key_points TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN risks TEXT DEFAULT ''`); } catch {}
+try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN mode TEXT DEFAULT 'ai'`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN symbol TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN shares REAL DEFAULT 0`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN price REAL DEFAULT 0`); } catch {}
@@ -850,6 +851,7 @@ function publicState(uid) {
     alerts: db.prepare('SELECT * FROM alerts WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     autoLog: db.prepare('SELECT * FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     predictorChats: db.prepare('SELECT * FROM predictor_chats WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(uid),
+    ...predictorLimitInfo(uid, user), // predictorLimit / Used / Remaining / Unlimited (AI asks only)
     settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), discordInviteUrl: DISCORD_INVITE_URL,
     feedback: user.is_owner ? db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT 100').all() : undefined,
     players: db.prepare('SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = \'\' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at').all(),
@@ -879,8 +881,10 @@ function leaderboardRows() {
   rows.sort((a, b) => (b.allTimePct - a.allTimePct) || (b.netWorth - a.netWorth) || a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
   return rows.map((r, i) => ({ rank: i + 1, ...r }));
 }
-function rankFor(allTimePct, netWorth) {
-  if (allTimePct >= 25 || netWorth >= 200000) return 'Whale';
+function rankFor(allTimePct) {
+  // Ranks are % return only — never dollars, so a small account that
+  // doubles beats a big account that barely moves.
+  if (allTimePct >= 25) return 'Whale';
   if (allTimePct >= 10) return 'Diamond Hands';
   if (allTimePct >= 5) return 'Trader';
   if (allTimePct >= 0) return 'Rookie';
@@ -901,19 +905,25 @@ function computeAchievements(uid) {
   const distinctDays = new Set(trades.map(t => { const d = etDate(new Date(t.created_at)); return `${d.year}-${d.month}-${d.day}`; })).size;
   const firstAuto = trades.find(t => (t.source || '').startsWith('auto'));
   const bestWorth = s.bestWorth || s.netWorth;
+  // Achievements are % return only — never dollars. The old "$150K Club /
+  // $200K Club" badges rewarded a big starting cash, not skill: with a
+  // $100k start, +50% is $150k and +100% is $200k, so the badges below
+  // keep those milestones as % returns and work for any starting cash.
+  const startCash = s.settings.startCash || START_CASH;
+  const bestReturnPct = startCash ? ((bestWorth - startCash) / startCash) * 100 : 0;
   const badges = [
     { id: 'first-trade', name: 'First Trade', desc: 'Made your first trade', earned: trades.length >= 1, earnedAt: trades[0]?.created_at || null },
     { id: 'big-win', name: '+10% Winner', desc: 'Banked +10% or more on a single sell', earned: !!firstBigWin, earnedAt: firstBigWin?.created_at || null },
     { id: 'stop-honoured', name: 'Stop Honoured', desc: 'Sold at a loss within your stop instead of riding it down', earned: !!stopSave, earnedAt: stopSave?.created_at || null },
     { id: 'streak-5', name: '5-Day Trader', desc: 'Traded on 5 different days', earned: distinctDays >= 5, earnedAt: null },
-    { id: 'worth-150k', name: '$150K Club', desc: 'Net worth reached $150,000', earned: bestWorth >= 150000, earnedAt: null },
-    { id: 'worth-200k', name: '$200K Club', desc: 'Net worth reached $200,000', earned: bestWorth >= 200000, earnedAt: null },
+    { id: 'return-50', name: '+50% Club', desc: 'All-time return reached +50%', earned: bestReturnPct >= 50, earnedAt: null },
+    { id: 'return-100', name: '+100% Club', desc: 'All-time return reached +100% — doubled your money', earned: bestReturnPct >= 100, earnedAt: null },
     { id: 'ten-trades', name: '10 Trades', desc: 'Made 10 trades in total', earned: trades.length >= 10, earnedAt: trades[9]?.created_at || null },
     { id: 'first-auto', name: 'First Auto-Trade', desc: 'The auto trader made a trade for you', earned: !!firstAuto, earnedAt: firstAuto?.created_at || null },
   ];
   return {
-    rank: rankFor(s.allTimePct, s.netWorth),
-    allTimePct: s.allTimePct, netWorth: s.netWorth, bestWorth,
+    rank: rankFor(s.allTimePct),
+    allTimePct: s.allTimePct, netWorth: s.netWorth, bestWorth, bestReturnPct: Math.round(bestReturnPct * 100) / 100,
     tradeCount: trades.length, distinctDays,
     earnedCount: badges.filter(b => b.earned).length, totalCount: badges.length,
     badges,
@@ -935,9 +945,13 @@ app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE
 app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = '' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at").all() }));
 
 app.post('/api/auth/register', async (req, res) => {
-  const { name, pin, email } = req.body || {};
+  const { name, pin, email, startCash } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Enter your name' });
   if (pin && String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 characters' });
+  // Starting cash is chosen at sign-up ($100–$10,000,000, default $100,000).
+  // Validate server-side — a bad value is rejected, never silently clamped.
+  const sc = (startCash == null || startCash === '') ? START_CASH : Math.floor(+startCash);
+  if (!Number.isFinite(sc) || sc < 100 || sc > 10000000) return res.status(400).json({ error: 'Starting cash must be $100–$10,000,000' });
   if (db.prepare('SELECT 1 FROM users WHERE name=?').get(name.trim())) return res.status(400).json({ error: 'That name is taken' });
   // Owner is ONLY an exact name match with OWNER_NAME (default Lucas,
   // case-insensitive). The first registrant is never owner just for being
@@ -946,7 +960,10 @@ app.post('/api/auth/register', async (req, res) => {
   const salt = crypto.randomBytes(16).toString('hex');
   const pinHash = pin ? hashPin(String(pin), salt) : null; // no PIN yet — claim it later with SET PIN & CLAIM IT
   const id = db.prepare('INSERT INTO users(name,pin_hash,salt,email,is_owner,created_at) VALUES(?,?,?,?,?,?)').run(name.trim(), pinHash, salt, '', isOwner, Date.now()).lastInsertRowid;
-  getGame(id); getSettings(id);
+  // Save the chosen starting cash BEFORE creating the game, so getGame()
+  // seeds cash (and the portfolio snapshot below) at exactly that amount.
+  const s0 = getSettings(id); s0.startCash = sc; saveSettings(id, s0);
+  getGame(id); snapshotNetWorth(id);
   // PIN-less accounts are claim-only: no session token, no auto sign-in.
   // The player must tap their name on the sign-in page and choose SET PIN & CLAIM IT.
   if (!pinHash) return res.json({ token: null, needsClaim: true, user: { id, name: name.trim(), isOwner: !!isOwner, emailVerified: false }, needsVerification: false, codeSent: false, codeError: null, smtpConfigured: smtpConfigured() });
@@ -1177,10 +1194,36 @@ app.post('/api/account/delete', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Predictor daily limit — AI mode ONLY. Standard members get 2 Verity AI
+// questions per ET calendar day; rules-only questions are unlimited and
+// never counted, and the owner is unlimited in both modes. Counts AI-mode
+// asks recorded in predictor_chats for the current ET day (legacy rows
+// predate the mode column and default to 'ai', since every ask then was
+// an AI attempt).
+const PREDICTOR_AI_DAILY_LIMIT = 2;
+function predictorAiUsedToday(uid) {
+  const d = etDate();
+  const [start, end] = etDayBounds(d.year, d.month, d.day);
+  return db.prepare(`SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND (mode IS NULL OR mode='ai') AND created_at>=? AND created_at<?`).get(uid, start, end).c;
+}
+function predictorLimitInfo(uid, user) {
+  if (user?.is_owner) return { predictorLimit: PREDICTOR_AI_DAILY_LIMIT, predictorUsed: predictorAiUsedToday(uid), predictorRemaining: null, predictorUnlimited: true };
+  const used = predictorAiUsedToday(uid);
+  return { predictorLimit: PREDICTOR_AI_DAILY_LIMIT, predictorUsed: used, predictorRemaining: Math.max(0, PREDICTOR_AI_DAILY_LIMIT - used), predictorUnlimited: false };
+}
 // Predictor
 app.post('/api/predictor', auth, async (req, res) => {
   const { symbol, question } = req.body || {};
   if (!boardSymbols(req.user.id).all.includes(symbol) || !question) return res.status(400).json({ error: 'Pick a ticker and ask a question' });
+  // Mode: 'ai' (Verity AI, limited) or 'rules' (rules-only, unlimited).
+  // No mode sent = 'ai', as before. The 2/day limit applies ONLY to AI
+  // asks by non-owners — rules-only asks are never counted or blocked,
+  // and the owner is unlimited in both modes. Check BEFORE any live
+  // fetch or AI call, so a blocked ask costs nothing and is not recorded.
+  const mode = req.body?.mode === 'rules' ? 'rules' : 'ai';
+  if (mode === 'ai' && !req.user.is_owner && predictorAiUsedToday(req.user.id) >= PREDICTOR_AI_DAILY_LIMIT) {
+    return res.status(429).json({ error: 'Daily Predictor limit reached — 2 AI questions a day for standard members. Come back tomorrow. (Rules-only questions are unlimited — switch to Rules only below.)', ...predictorLimitInfo(req.user.id, req.user) });
+  }
   const quotes = effectiveQuotesFor(req.user.id, await fetchLiveQuotes(boardSymbols(req.user.id).all));
   const q = quotes[symbol];
   const res2 = await researchPass(symbol, quotes);
@@ -1188,7 +1231,9 @@ app.post('/api/predictor', auth, async (req, res) => {
   let outlook = 'Neutral', confidence = 50;
   if (chg <= -3) { outlook = 'Bearish'; confidence = 60; } else if (chg >= 3) { outlook = 'Bullish'; confidence = 60; }
   else if (chg >= 1) { outlook = 'Bullish'; confidence = 45; } else if (chg <= -1) { outlook = 'Bearish'; confidence = 45; }
-  const ai = await aiDecide(`You are a paper-trading analyst. Ticker ${symbol}, live price $${q?.price}, day change ${chg.toFixed(2)}%. Trend: ${res2.trend} Headlines: ${res2.headlines.join('; ') || 'none'}. Question: ${question}. Give outlook (Bullish/Bearish/Neutral/Mixed), confidence 0-100, 3 key points, 2 risks, timeframe. Keep it short.`);
+  // AI runs only in AI mode. Rules mode skips the AI call entirely —
+  // the answer below is built from live price, trend and news.
+  const ai = mode === 'ai' ? await aiDecide(`You are a paper-trading analyst. Ticker ${symbol}, live price $${q?.price}, day change ${chg.toFixed(2)}%. Trend: ${res2.trend} Headlines: ${res2.headlines.join('; ') || 'none'}. Question: ${question}. Give outlook (Bullish/Bearish/Neutral/Mixed), confidence 0-100, 3 key points, 2 risks, timeframe. Keep it short.`) : null;
   const timeframe = /week/i.test(question) ? 'This week' : /swing/i.test(question) ? 'Next 1–4 weeks' : 'Next 1–5 trading days';
   const keyPoints = [
     `Live price $${q?.price} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% today, prev close $${q?.prevClose}) — momentum is ${chg >= 0 ? 'positive' : 'negative'} today.`,
@@ -1196,10 +1241,13 @@ app.post('/api/predictor', auth, async (req, res) => {
     res2.headlines.length ? `Fresh headlines: ${res2.headlines.join(' | ')}` : 'No fresh headlines found for this ticker.',
   ];
   const risks = ['After-hours moves can reverse at the open', 'Single-day moves are noisy — watch the -5% stop / +10% target lines'];
-  let answer = ai || `${symbol} — ${outlook} (${confidence}% confidence).\n${keyPoints.join('\n')}\nRisks: ${risks.join('; ')}.\nTimeframe: ${timeframe}.\n(AI research unavailable — no AI_API_KEY configured; answer is rules-based from live price, trend and news.)`;
-  db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), Date.now());
-  res.json({ outlook, confidence, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, state: publicState(req.user.id) });
+  let answer = ai || `${symbol} — ${outlook} (${confidence}% confidence).\n${keyPoints.join('\n')}\nRisks: ${risks.join('; ')}.\nTimeframe: ${timeframe}.\n${mode === 'rules' ? '(Rules-only answer — no AI used, unlimited questions.)' : '(AI research unavailable — no AI_API_KEY configured; answer is rules-based from live price, trend and news.)'}`;
+  db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), mode, Date.now());
+  res.json({ outlook, confidence, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, predictorMode: mode, ...predictorLimitInfo(req.user.id, req.user), state: publicState(req.user.id) });
 });
+// How many of today's 2 AI questions a standard member has left.
+// Rules-only questions are unlimited, so they are not counted here.
+app.get('/api/predictor/limit', auth, (req, res) => res.json(predictorLimitInfo(req.user.id, req.user)));
 // Predictor track record: every past answer is scored against the actual
 // price move since it was asked. Only Bullish/Bearish calls are scored
 // (Neutral/Mixed make no directional call). A call scores once the move is
