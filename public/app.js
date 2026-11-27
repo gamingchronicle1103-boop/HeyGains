@@ -241,6 +241,12 @@ async function loadState() {
   flashNum($('net-worth-big'), state.netWorth, money(state.netWorth));
   $('net-worth-sub').innerHTML = `All-time <b class="${state.allTime >= 0 ? 'up' : 'down'}">${state.allTime >= 0 ? '+' : ''}${money(state.allTime)} (${pct(state.allTimePct)})</b> · Best worth <b>${money(state.bestWorth || state.netWorth)}</b>`;
   flashEl($('net-worth-sub'), 'net-worth-sub', state.netWorth);
+  // Close balance vs live balance: after the bell the live figure keeps
+  // moving on extended-hours prices; the close figure is frozen at the
+  // regular-session close. When overnight prices are off the two match.
+  const cd = state.netWorth - (state.closeNetWorth ?? state.netWorth);
+  $('net-worth-close').innerHTML = `Balance at close <b>${money(state.closeNetWorth ?? state.netWorth)}</b> · Live <b>${money(state.netWorth)}</b> <span class="${cd >= 0 ? 'up' : 'down'}">(${cd >= 0 ? '+' : ''}${money(cd)} vs close)</span>`;
+  flashEl($('net-worth-close'), 'net-worth-close', state.netWorth);
   flashNum($('score-cash'), state.cash, money(state.cash));
   $('score-cash-sub').textContent = 'Available to trade';
   // Set the up/down class BEFORE flashing, so the flash class survives.
@@ -248,12 +254,12 @@ async function loadState() {
   flashNum($('score-today'), state.todayChange, (state.todayChange >= 0 ? '+' : '') + money(state.todayChange));
   flashNum($('score-today-sub'), state.todayPct, pct(state.todayPct) + ' today on holdings');
   $('score-session').textContent = sessionDisplay(state.session);
-  $('score-session-sub').textContent = state.session === 'Open' ? 'Regular session · 9:30 AM–4:00 PM ET' : 'Trading stays open — fills at the live extended price';
+  $('score-session-sub').textContent = state.session === 'Open' ? 'Regular session · ' + (state.sessionHours || '9:30 AM–4:00 PM ET') : 'Trading stays open — fills at the live extended price';
   const sb = $('session-badge'); sb.textContent = sessionDisplay(state.session); sb.className = 'badge ' + sessionBadgeClass(state.session);
   $('market-label').textContent = state.session === 'Open' ? 'NYSE · Regular session' : 'NYSE · ' + state.session;
   $('ext-explainer').textContent = state.settings.overnightPrices === false && state.session !== 'Open'
-    ? 'Overnight prices are OFF: your game is frozen at the 4 PM close outside market hours — board, positions, fills, pings and the auto trader all use the close.'
-    : 'Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the 4 PM close. When overnight prices are off, your game freezes at the 4 PM close outside market hours instead.';
+    ? 'Overnight prices are OFF: your game is frozen at the regular close outside market hours — board, positions, fills, pings and the auto trader all use the close.'
+    : 'Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the regular close. When overnight prices are off, your game freezes at the regular close outside market hours instead.';
   $('trade-session-banner').textContent = 'Session: ' + sessionDisplay(state.session) + ' — trading never closes. You fill at the LIVE extended price, never the close.';
   $('footer-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : '';
   renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges(); updatePredLimit();
@@ -514,7 +520,7 @@ async function loadChart() {
     $('chart-change').textContent = ` ${pct(chg)} ${chartRange === '1D' ? 'today' : 'over ' + chartRange}`;
     $('chart-change').className = chg >= 0 ? 'up' : 'down';
     const extPct = q.regularClose ? ((q.price - q.regularClose) / q.regularClose) * 100 : 0;
-    $('chart-ext').textContent = `Overnight ${pct(extPct)} · 4 PM close ${money(q.regularClose)} · last trade ${q.lastTrade || '—'}${q.frozenAtClose ? ' · frozen at close (overnight off)' : ''}`;
+    $('chart-ext').textContent = `Overnight ${pct(extPct)} · ${closeHourLabel()} ${money(q.regularClose)} · last trade ${q.lastTrade || '—'}${q.frozenAtClose ? ' · frozen at close (overnight off)' : ''}`;
   }
   const intervals = { '1D': '1-minute', '5D': '15-minute', '1M': 'daily', '3M': 'daily', '6M': 'weekly', '1Y': 'weekly', '5Y': 'monthly' };
   // M8: RSI is computed over REAL bars only — filled (f=1) points are
@@ -526,6 +532,12 @@ async function loadChart() {
   const candleNote = `${chartData.candles?.length || 0} candles · ${chartData.candleStep || 1} bar${(chartData.candleStep || 1) > 1 ? 's' : ''} per candle`;
   const maNote = showMA20 ? ` · MA20 over 20 ${chartMode === 'candles' ? 'candles' : 'bars'}` : '';
   $('chart-caption').textContent = `${chartRange} · ${intervals[chartRange]} bars · ${chartData.points.length} bars${chartRange === '1D' ? ' · purple shading = premarket / after-hours' : ''} · ${candleNote} · RSI(14) ${rsi == null ? '—' : rsi.toFixed(0) + ' (' + rsiLabel(rsi) + ')'}${maNote}`;
+  if (chartRange === '1D') {
+    // Session-aware note: on an early-close day after-hours starts at the
+    // real close (e.g. 1:00 PM), not 4:00 PM, and the amber line is the
+    // real close, not "4 PM close".
+    $('chart-ah-note').textContent = `Purple shading on 1D = premarket (before ${etTimeLabel(chartData.regularStart, '9:30 AM')} ET) and after-hours (after ${etTimeLabel(chartData.regularEnd, '4:00 PM')} ET). The grey dashed line is the previous close; the amber dashed line is the ${closeHourLabel()}; the amber dotted line is your average cost when you hold the stock. Fills are at the LIVE extended price — never the close.`;
+  }
   drawChart();
 }
 // Chart indicators — pure functions of closes, so they can be unit-tested.
@@ -557,6 +569,20 @@ function etMins(t) {
   const fmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false });
   const p = Object.fromEntries(fmt.formatToParts(new Date(t)).map(x => [x.type, x.value]));
   return (+p.hour % 24) * 60 + (+p.minute);
+}
+// Session-aware close label: "1 PM close" on an early-close day, "4 PM
+// close" on a normal day. The regular-session end comes from the server
+// (chartData.regularEnd, ms epoch, Yahoo currentTradingPeriod); fall back
+// to the old hardcoded label when the server didn't send it.
+function closeHourLabel() {
+  if (chartData?.regularEnd != null) {
+    return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: true }).format(new Date(chartData.regularEnd)) + ' close';
+  }
+  return '4 PM close';
+}
+function etTimeLabel(t, fallback) {
+  if (t == null) return fallback;
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(t));
 }
 function drawChart() {
   const cv = $('chart'); if (!cv) return;
@@ -596,9 +622,9 @@ function drawChart() {
     ctx.fillStyle = '#7d8f83'; ctx.fillText('prev close ' + money(chartData.prevClose), 58, Y(chartData.prevClose) - 5);
   }
   const q = quotes[chartSymbol];
-  if (chartRange === '1D' && q?.regularClose) { // amber dashed 4 PM close line — 1D only, it means nothing on 5D/1M/1Y
+  if (chartRange === '1D' && q?.regularClose) { // amber dashed close line — 1D only, it means nothing on 5D/1M/1Y. Label is session-aware: "1 PM close" on an early-close day, "4 PM close" normally.
     ctx.setLineDash([6, 4]); ctx.strokeStyle = '#ffb02e'; ctx.beginPath(); ctx.moveTo(52, Y(q.regularClose)); ctx.lineTo(W - 20, Y(q.regularClose)); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#ffb02e'; ctx.fillText('4 PM close ' + money(q.regularClose), 58, Y(q.regularClose) - 5);
+    ctx.fillStyle = '#ffb02e'; ctx.fillText(closeHourLabel() + ' ' + money(q.regularClose), 58, Y(q.regularClose) - 5);
   }
   const held = (state?.positions || []).find(p => p.symbol === chartSymbol);
   if (held) { // amber dotted "your avg" line
@@ -760,7 +786,7 @@ function updateTradeEstimates() {
   renderQuickSize();
   if (!q) { $('trade-est').textContent = 'Waiting for a live price…'; $('trade-cash-after').textContent = ''; $('trade-position-line').textContent = ''; return; }
   const total = shares * q.price;
-  const frozenNote = q.frozenAtClose ? ' · frozen at the 4 PM close (overnight prices off)' : '';
+  const frozenNote = q.frozenAtClose ? ' · frozen at the regular close (overnight prices off)' : '';
   flashNum($('trade-est'), total, (tradeSide === 'buy' ? `Est. cost: ${money(total)} (${shares} × ${money(q.price)})` : `Est. proceeds: ${money(total)} (${shares} × ${money(q.price)})`) + frozenNote);
   flashNum($('trade-cash-after'), tradeSide === 'buy' ? state.cash - total : state.cash + total, 'Cash after: ' + money(tradeSide === 'buy' ? state.cash - total : state.cash + total));
   const pos = heldPosition(chartSymbol);

@@ -30,7 +30,7 @@
     </div>
     <h3>WHAT'S INSIDE</h3>
     <ul class="welcome-list">
-      <li><b>REAL PRICES LIVE</b>Live quotes every 10 seconds, including premarket and after-hours vs the 4 PM close.</li>
+      <li><b>REAL PRICES LIVE</b>Live quotes every 10 seconds, including premarket and after-hours vs the regular close.</li>
       <li><b>TRADE IT LIKE IT'S REAL</b>Fractional shares, live extended fills, and your −5% stop / +10% target guardrails.</li>
       <li><b>VERITY AI PREDICTOR</b>Ask about any ticker and get Bullish / Bearish / Neutral / Mixed with confidence.</li>
       <li><b>BUY/SELL PINGS</b>Dip, momentum, stop and target pings — in the app, by sound, and by email.</li>
@@ -165,12 +165,13 @@
   <p class="eyebrow">NET WORTH · PAPER</p>
   <div id="net-worth-big">$0.00</div>
   <p class="score-sub" id="net-worth-sub"></p>
+  <p class="score-sub" id="net-worth-close"></p>
   <div class="score-grid">
     <div class="score-box"><div class="score-label">CASH</div><div class="score-val" id="score-cash">$0</div><div class="score-sub2" id="score-cash-sub"></div></div>
     <div class="score-box"><div class="score-label">TODAY</div><div class="score-val" id="score-today">$0</div><div class="score-sub2" id="score-today-sub"></div></div>
     <div class="score-box"><div class="score-label">SESSION</div><div class="score-val" id="score-session">—</div><div class="score-sub2" id="score-session-sub"></div></div>
   </div>
-  <p class="muted small" id="ext-explainer">Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the 4 PM close. When overnight prices are off, your game freezes at the 4 PM close outside market hours instead.</p>
+  <p class="muted small" id="ext-explainer">Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the regular close. When overnight prices are off, your game freezes at the regular close outside market hours instead.</p>
 </div>
 
 <div id="banner" class="banner hidden"></div>
@@ -199,9 +200,9 @@
           <div class="seg"><button id="chart-line" class="active">Line</button><button id="chart-candles">Candles</button><button id="chart-ma20" title="Toggle 20-period moving average">MA20</button></div>
         </div>
         <div class="chart-wrap"><canvas id="chart" width="760" height="300"></canvas><div id="chart-tip" class="chart-tip hidden"></div></div>
-        <div class="legend"><span><i class="lg-accent"></i>Live price</span><span><i class="lg-grey"></i>Prev-close (dashed)</span><span><i class="lg-amber"></i>4 PM close (dashed)</span><span><i class="lg-amber"></i>Your avg (dotted)</span><span><i class="lg-purple"></i>Premarket / after-hours</span><span><i class="lg-ma20"></i>MA20 (toggle)</span><span><i class="lg-vol"></i>Volume</span></div>
+        <div class="legend"><span><i class="lg-accent"></i>Live price</span><span><i class="lg-grey"></i>Prev-close (dashed)</span><span><i class="lg-amber"></i>Regular close (dashed)</span><span><i class="lg-amber"></i>Your avg (dotted)</span><span><i class="lg-purple"></i>Premarket / after-hours</span><span><i class="lg-ma20"></i>MA20 (toggle)</span><span><i class="lg-vol"></i>Volume</span></div>
         <p id="chart-caption" class="muted small"></p>
-        <p id="chart-ah-note" class="muted small">Purple shading on 1D = premarket (before 9:30 AM ET) and after-hours (after 4:00 PM ET). The grey dashed line is the previous close; the amber dashed line is the 4 PM close; the amber dotted line is your average cost when you hold the stock. Fills are at the LIVE extended price — never the close.</p>
+        <p id="chart-ah-note" class="muted small">Purple shading on 1D = premarket (before 9:30 AM ET) and after-hours (after the regular close). The grey dashed line is the previous close; the amber dashed line is the regular close; the amber dotted line is your average cost when you hold the stock. Fills are at the LIVE extended price — never the close.</p>
         <p id="chart-error" class="error hidden"></p>
       </div>
       <div class="card">

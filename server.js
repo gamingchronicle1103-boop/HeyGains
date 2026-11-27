@@ -1013,6 +1013,17 @@ function publicState(uid, opts = {}) {
     return { ...p, price, isShort, changePct: isShort ? ((p.avg_cost - price) / p.avg_cost) * 100 : ((price - p.avg_cost) / p.avg_cost) * 100 };
   });
   const netWorth = game.cash + positions.reduce((a, p) => a + p.price * p.shares, 0);
+  // Close balance: every position priced at its regular-session close
+  // (regularClose, else prevClose, else avg_cost). The live net worth
+  // above keeps moving after the bell on extended-hours prices; the close
+  // balance is the frozen-at-close figure. They only differ while the
+  // market is closed (or while overnight prices are on) — when overnight
+  // prices are off, effectiveQuotesFor() already froze live prices at
+  // regularClose, so the two match exactly. Uses the RAW quotes (before
+  // the per-player freeze) so the close price is the same for everyone.
+  const closePriceOf = sym => raw[sym]?.regularClose ?? raw[sym]?.prevClose ?? null;
+  const closeNetWorth = game.cash + positions.reduce((a, p) => a + (closePriceOf(p.symbol) ?? p.avg_cost) * p.shares, 0);
+  const closeDiff = netWorth - closeNetWorth; // live minus close
   const allTime = netWorth - (s.startCash || START_CASH);
   const allTimePct = (s.startCash || START_CASH) ? (allTime / (s.startCash || START_CASH)) * 100 : 0;
   // Today change is measured vs yesterday's close (prevClose), so buying
@@ -1048,9 +1059,14 @@ function publicState(uid, opts = {}) {
   // caller says so (trade / order / snapshot paths pass updateBest: true).
   if (opts.updateBest && netWorth > bestWorth) { bestWorth = netWorth; db.prepare('UPDATE game SET best_worth=? WHERE user_id=?').run(bestWorth, uid); }
   const emailQueued = db.prepare("SELECT COUNT(*) c FROM email_queue WHERE user_id=? AND status='queued'").get(uid).c;
+  // Session hours for display: on an early-close day the regular session
+  // ends at 1:00 PM ET, not 4:00 PM — the old hardcoded "9:30 AM–4:00 PM"
+  // label lied on those days.
+  const etNow = etDate(new Date());
+  const sessionHours = isEarlyClose(etNow.year, etNow.month, etNow.day, etNow.weekday) ? '9:30 AM–1:00 PM ET' : '9:30 AM–4:00 PM ET';
   return {
     user: { id: user.id, name: user.name, email: user.email || '', pendingEmail: user.pending_email || '', emailVerified: !!user.email_verified, isOwner: !!user.is_owner },
-    cash: game.cash, bestRun: game.best_run, bestWorth, netWorth, allTime, allTimePct, todayChange, todayPct, emailQueued, quotesAsOf, quotesStale,
+    cash: game.cash, bestRun: game.best_run, bestWorth, netWorth, closeNetWorth, closeDiff, allTime, allTimePct, todayChange, todayPct, emailQueued, quotesAsOf, quotesStale,
     positions, customSymbols: boardSymbols(uid).custom, coreTickers: TICKERS,
     trades: db.prepare('SELECT * FROM trades WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     orders: listOrders(uid),
@@ -1058,7 +1074,7 @@ function publicState(uid, opts = {}) {
     autoLog: db.prepare('SELECT * FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     predictorChats: db.prepare('SELECT * FROM predictor_chats WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(uid),
     ...predictorLimitInfo(uid, user), // predictorLimit / Used / Remaining / Unlimited (AI asks only)
-    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), discordInviteUrl: DISCORD_INVITE_URL,
+    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), sessionHours, discordInviteUrl: DISCORD_INVITE_URL,
     feedback: user.is_owner ? db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT 100').all() : undefined,
     players: db.prepare('SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = \'\' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at').all(),
   };
