@@ -237,7 +237,7 @@ function drawChart() {
     ctx.fillStyle = '#7d8f83'; ctx.fillText('prev close ' + money(chartData.prevClose), 58, Y(chartData.prevClose) - 5);
   }
   const q = quotes[chartSymbol];
-  if (q?.regularClose) { // amber dashed 4 PM close line
+  if (chartRange === '1D' && q?.regularClose) { // amber dashed 4 PM close line — 1D only, it means nothing on 5D/1M/1Y
     ctx.setLineDash([6, 4]); ctx.strokeStyle = '#ffb02e'; ctx.beginPath(); ctx.moveTo(52, Y(q.regularClose)); ctx.lineTo(W - 20, Y(q.regularClose)); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = '#ffb02e'; ctx.fillText('4 PM close ' + money(q.regularClose), 58, Y(q.regularClose) - 5);
   }
