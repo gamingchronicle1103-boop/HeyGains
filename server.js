@@ -29,6 +29,14 @@ const STYLES = {
 };
 const START_CASH = 100000;
 const OWNER_NAME = (process.env.OWNER_NAME || 'Lucas').toLowerCase();
+// Discord invite link for the HeyGains community server.
+// Set DISCORD_INVITE_URL in the environment (or .env) to a real invite,
+// e.g. https://discord.gg/xxxxxx — until then it stays empty and the
+// in-app Discord buttons render as "coming soon" and link nowhere.
+// Only genuine discord.gg / discord.com/invite URLs are accepted, so a
+// typo or a wrong URL can never send players somewhere else.
+const _discordRaw = (process.env.DISCORD_INVITE_URL || '').trim();
+const DISCORD_INVITE_URL = /^https:\/\/(discord\.gg\/[A-Za-z0-9_-]+|discord\.com\/invite\/[A-Za-z0-9_-]+)\/?$/.test(_discordRaw) ? _discordRaw : '';
 
 // ---------- DB ----------
 db.exec(`
@@ -841,7 +849,7 @@ function publicState(uid) {
     alerts: db.prepare('SELECT * FROM alerts WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     autoLog: db.prepare('SELECT * FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     predictorChats: db.prepare('SELECT * FROM predictor_chats WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(uid),
-    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(),
+    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), discordInviteUrl: DISCORD_INVITE_URL,
     feedback: user.is_owner ? db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT 100').all() : undefined,
     players: db.prepare('SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = \'\' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at').all(),
   };
@@ -919,6 +927,9 @@ function wipeGame(uid, startCash) {
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true, app: APP_NAME, session: marketSession(), users: db.prepare('SELECT COUNT(*) c FROM users').get().c }));
+// Public config — no auth needed (the welcome screen is shown before
+// sign-in). Only exposes the Discord invite URL (empty until configured).
+app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL }));
 app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = '' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at").all() }));
 
 app.post('/api/auth/register', async (req, res) => {

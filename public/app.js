@@ -132,6 +132,7 @@ function sparkSvg(spark, up) {
 // ---------- State ----------
 async function loadState() {
   state = await api('/api/state');
+  applyDiscordLinks(state.discordInviteUrl || '');
   $('user-line').textContent = 'Playing as ' + state.user.name + (state.user.isOwner ? ' · OWNER' : '');
   $('net-worth-big').textContent = money(state.netWorth);
   $('net-worth-sub').innerHTML = `All-time <b class="${state.allTime >= 0 ? 'up' : 'down'}">${state.allTime >= 0 ? '+' : ''}${money(state.allTime)} (${pct(state.allTimePct)})</b> · Best worth <b>${money(state.bestWorth || state.netWorth)}</b>`;
@@ -1151,6 +1152,20 @@ async function loadPlayers() {
     });
   } catch { $('player-list').innerHTML = '<p class="muted">LOADING PLAYERS… (couldn\'t reach the game — it will retry)</p>'; }
 }
+// Discord invite — the URL lives on the server (DISCORD_INVITE_URL env),
+// never hard-coded here. While it is empty the buttons read "coming soon"
+// and link nowhere; once set they open the real invite in a new tab.
+function applyDiscordLinks(url) {
+  for (const id of ['discord-welcome', 'discord-sidebar']) {
+    const el = $(id); if (!el) continue;
+    if (url) { el.href = url; el.target = '_blank'; el.rel = 'noopener'; el.removeAttribute('aria-disabled'); el.textContent = 'JOIN OUR DISCORD ↗'; }
+    else { el.removeAttribute('href'); el.removeAttribute('target'); el.setAttribute('aria-disabled', 'true'); el.textContent = 'DISCORD — COMING SOON'; }
+  }
+}
+async function loadDiscordLink() {
+  try { const r = await fetch('/api/config'); const j = await r.json(); applyDiscordLinks(j.discordInviteUrl || ''); }
+  catch { applyDiscordLinks(''); }
+}
 // Welcome board
 (function renderWelcomeBoard() {
   const el = $('welcome-board'); if (!el) return;
@@ -1163,6 +1178,7 @@ async function loadPlayers() {
 (async () => {
   applyTheme(localStorage.getItem('verityinvest-theme') || 'terminal');
   renderThemePickers();
+  await loadDiscordLink();
   if (!localStorage.getItem('verityinvest-welcomed')) showWelcome(); else $('welcome-screen').classList.add('hidden');
   if (token) {
     try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}

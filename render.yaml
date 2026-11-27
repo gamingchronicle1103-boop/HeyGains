@@ -26,3 +26,7 @@ services:
       # unset so the DB uses the local data/ folder instead.
       - key: DATA_DIR
         value: /data
+      # Discord community invite link. Leave blank until the server is
+      # ready — the in-app button then reads "Discord — coming soon".
+      - key: DISCORD_INVITE_URL
+        value: ''

@@ -95,6 +95,9 @@ main{padding:14px 18px 40px;max-width:1180px;margin:0 auto}
 .btn.danger:hover{background:#991b1b}
 .btn.small{padding:6px 11px;font-size:13px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
+.discord-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#5865f2;border-color:#5865f2;color:#fff;text-decoration:none}
+.discord-btn:hover{background:#4752c4;border-color:#4752c4}
+.discord-btn[aria-disabled="true"]{opacity:.45;cursor:not-allowed;pointer-events:none}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
 label{display:block;margin:10px 0;font-size:14px;color:var(--text-2)}
 label>input,label>select,label>textarea{margin-top:5px}
