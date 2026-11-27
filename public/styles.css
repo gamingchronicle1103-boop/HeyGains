@@ -305,3 +305,18 @@ footer{text-align:center;color:var(--muted);padding:22px;font-size:13px}
 .challenge-row .spacer{flex:1}
 .coach-obs{padding:10px 2px;border-bottom:1px solid var(--border);font-size:14px;line-height:1.5}
 .coach-obs:last-of-type{border-bottom:0}
+
+/* ---------- Space-parity additions ---------- */
+.welcome-cta{border:1px solid var(--accent);padding:18px;margin:24px 0 8px;text-align:center}
+.welcome-cta p{margin:8px 0}
+.side-nav-label{display:flex;flex-direction:column;min-width:0;flex:1}
+.side-hint{color:var(--muted);font-weight:400;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.side-settings{padding:0 4px}
+.side-settings .muted{margin:2px 0 8px}
+.theme-swatch{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;color:var(--text);font:inherit;font-size:12px;font-weight:700}
+.theme-swatch.active{border-color:var(--accent)}
+.theme-swatch .theme-dot{width:18px;height:18px}
+.chat-msg.own{border-left:3px solid var(--accent);padding-left:8px}
+button.chip{cursor:pointer;font:inherit}
+.modal-list{margin:10px 0 10px 20px;line-height:1.6}
+.style-card .style-desc{display:block;font-size:11px;line-height:1.4;margin-top:4px}

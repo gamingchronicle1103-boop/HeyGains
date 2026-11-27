@@ -22,10 +22,10 @@ const TICKERS = ['NVDA', 'TSLA', 'AMD', 'META', 'AMZN', 'GOOGL', 'MSFT', 'INTC',
 const NAMES = { NVDA: 'NVIDIA', TSLA: 'Tesla', AMD: 'Adv. Micro Devices', META: 'Meta Platforms', AMZN: 'Amazon', GOOGL: 'Alphabet', MSFT: 'Microsoft', INTC: 'Intel', TTWO: 'Take-Two Interactive', DUOL: 'Duolingo', FANG: 'Diamondback Energy', MCD: "McDonald's" };
 const KNOWN_CRYPTO = new Set(['BTC', 'ETH', 'SOL', 'DOGE', 'XRP', 'ADA', 'LTC', 'AVAX', 'LINK', 'DOT', 'MATIC', 'ATOM', 'USDT', 'USDC', 'BNB', 'TRX', 'NEAR', 'APT', 'ARB', 'OP', 'PEPE', 'SHIB']);
 const STYLES = {
-  scalping: { label: 'Scalping', stop: -2, target: 3, window: 'Minutes–hours', horizon: 'Minutes–hours' },
-  day: { label: 'Day Trading', stop: -5, target: 10, window: 'Same day–2 days', horizon: 'Same day–2 days' },
-  swing: { label: 'Swing', stop: -8, target: 20, window: 'Days–weeks', horizon: 'Days–weeks' },
-  position: { label: 'Position', stop: -12, target: 30, window: 'Weeks–months', horizon: 'Weeks–months' },
+  scalping: { label: 'Scalping', stop: -2, target: 3, window: 'Minutes–hours', horizon: 'Minutes–hours', hold: 'minutes to a few hours', brief: 'Scalping style: quick in-and-out trades on intraday bursts. Judge candidates ONLY on their last-15-minute and last-hour moves and the freshest news — what happened days ago barely matters. Favor the cleanest, strongest burst; a move that\'s already fading is a pass. Exits are tight: -2% stop, +3% target.' },
+  day: { label: 'Day Trading', stop: -5, target: 10, window: 'Same day–2 days', horizon: 'Same day–2 days', hold: 'same day to a couple of days', brief: 'Day-trading style: trades built around today\'s move. Judge candidates on today\'s dip or momentum, the last 5 sessions\' trend, and fresh news. Exits: -5% stop, +10% target.' },
+  swing: { label: 'Swing', stop: -8, target: 20, window: 'Days–weeks', horizon: 'Days–weeks', hold: 'days to a few weeks', brief: 'Swing style: rides multi-day moves. Judge candidates on the trend over the last 5 and 20 sessions — a pullback inside an uptrend or a breakout with trend behind it beats a one-day spike — plus fresh news and catalysts. Today\'s wiggle alone is NOT a reason. Exits are wider: -8% stop, +20% target.' },
+  position: { label: 'Position', stop: -12, target: 30, window: 'Weeks–months', horizon: 'Weeks–months', hold: 'weeks to months', brief: 'Position style: long holds in the strongest names. Judge candidates on the trend over the last 20 and ~60 sessions and the durability of the story in the news. Only buy strength you\'d be happy holding for weeks; one-day noise is irrelevant. Exits are widest: -12% stop, +30% target.' },
 };
 const START_CASH = 100000;
 const OWNER_NAME = (process.env.OWNER_NAME || 'Lucas').toLowerCase();
@@ -118,6 +118,7 @@ const DEFAULT_SETTINGS = () => ({
   overnightPrices: true, liveRefresh: true, startCash: START_CASH,
   autoOn: false, autoMode: 'rules', style: 'day', budgetPerBuy: 10000, maxPositions: 10, maxTradesPerDay: 5, checkSeconds: 30,
   creditSaver: true, emailPings: true, emailTrades: true,
+  lastAction: 'Auto trading is off — flip it on and Verity AI starts watching the tape.',
   savedMaxTradesPerDay: null, savedCheckSeconds: null, // owner's pre-Credit-Saver values, restored when Saver is turned off
 });
 function getSettings(uid) {
@@ -142,6 +143,14 @@ function effectiveSettings(uid, user) {
   else if (s.creditSaver) { s.checkSeconds = 30; s.maxTradesPerDay = Math.min(s.maxTradesPerDay || 2, 2); }
   return s;
 }
+// Signed percent with an explicit +/− ("+2.34%", "-1.20%", "n/a").
+function fmtSignedPct(n) { return n == null ? 'n/a' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`; }
+// % move from N bars back to the last bar (null when the series is too short).
+function pctOver(closes, barsBack) { const last = closes[closes.length - 1], then = closes[closes.length - 1 - barsBack]; if (last == null || then == null || then <= 0) return null; return ((last - then) / then) * 100; }
+// ET clock label for the live bar ("Fri 11/27 · 11:37 AM ET").
+function etLabel(d = new Date()) { const e = etDate(d); let h = e.hour % 12; if (h === 0) h = 12; return `${e.weekday} ${e.month}/${e.day} · ${h}:${String(e.minute).padStart(2, '0')} ${e.hour < 12 ? 'AM' : 'PM'} ET`; }
+// Persist the auto trader's one-line status (shown in the AUTO STATUS box).
+function setLastAction(uid, text) { const s = getSettings(uid); s.lastAction = text; saveSettings(uid, s); }
 function getGame(uid) {
   let g = db.prepare('SELECT * FROM game WHERE user_id=?').get(uid);
   if (!g) { const sc = getSettings(uid).startCash || START_CASH; db.prepare('INSERT INTO game(user_id,cash,best_run,best_worth,created_at) VALUES(?,?,?,?,?)').run(uid, sc, 0, sc, Date.now()); g = db.prepare('SELECT * FROM game WHERE user_id=?').get(uid); }
@@ -433,7 +442,7 @@ async function fetchHistory(sym, range) {
   return p;
 }
 async function fetchHistoryFresh(sym, range) {
-  const map = { '1D': ['1d', '1m'], '5D': ['5d', '15m'], '1M': ['1mo', '1d'], '3M': ['3mo', '1d'], '6M': ['6mo', '1wk'], '1Y': ['1y', '1wk'], '5Y': ['5y', '1mo'] };
+  const map = { '1D': ['1d', '1m'], '5D': ['5d', '30m'], '1M': ['1mo', '1d'], '3M': ['3mo', '1d'], '6M': ['6mo', '1wk'], '1Y': ['1y', '1wk'], '5Y': ['5y', '1mo'] };
   const [r, iv] = map[range] || map['1D'];
   const res = await yahooChartRetry(sym, r, iv);
   const ts = res.timestamp || [];
@@ -448,7 +457,7 @@ async function fetchHistoryFresh(sym, range) {
   const postEnd = meta.currentTradingPeriod?.post?.end ?? null;
   const regStartMs = (meta.currentTradingPeriod?.regular?.start ?? null) != null ? meta.currentTradingPeriod.regular.start * 1000 : null;
   const regEndMs = (meta.currentTradingPeriod?.regular?.end ?? null) != null ? meta.currentTradingPeriod.regular.end * 1000 : null;
-  const stepMs = range === '1D' ? 60000 : range === '5D' ? 15 * 60 * 1000 : 0;
+  const stepMs = range === '1D' ? 60000 : range === '5D' ? 30 * 60 * 1000 : 0;
   const pts = [];
   const seenTs = new Set();
   for (let i = ts.length - 1; i >= 0; i--) {
@@ -522,7 +531,7 @@ async function fetchHistoryFresh(sym, range) {
     // inside one ET calendar day — overnight/weekend gaps stay gaps, so the
     // line breaks there instead of faking a flat. Head-fill: start all
     // tickers at the same 4:00 AM boundary of the first day (M10).
-    const step = 15 * 60 * 1000;
+    const step = 30 * 60 * 1000;
     const sameDay = (a, b) => { const da = etDate(new Date(a)), db2 = etDate(new Date(b)); return da.year === db2.year && da.month === db2.month && da.day === db2.day; };
     if (prevCloseFill != null) {
       const { year, month, day } = etDate(new Date(pts[0].t));
@@ -814,10 +823,14 @@ function evaluatePings(uid, quotes) {
   const s = getSettings(uid);
   if (!s.pingsOn) return;
   const board = boardSymbols(uid).all;
+  const held = new Set(positionsOf(uid).map(p => p.symbol));
+  // Buy pings only fire on tickers the player does NOT hold — a dip in a
+  // stock already owned is a sell-watch / stop question, not a new buy.
   if (s.buyPings !== false) for (const sym of board) {
+    if (held.has(sym)) continue;
     const q = quotes[sym]; if (!q) continue;
-    if (q.changePct <= s.dipPct) addAlert(uid, sym, 'BUY·DIP', `${sym} dipped ${q.changePct.toFixed(2)}% today (dip ping at ${s.dipPct}%) — $${q.price}`, q.price);
-    if (q.changePct >= s.momentumPct) addAlert(uid, sym, 'BUY·MOMENTUM', `${sym} ripped +${q.changePct.toFixed(2)}% today (momentum ping at +${s.momentumPct}%) — $${q.price}`, q.price);
+    if (q.changePct <= s.dipPct) addAlert(uid, sym, 'BUY·DIP', `BUY PING — ${sym} dip alert — ${sym} is down ${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)} — past your ${s.dipPct}% dip level. Dip-buy setup per your plan.`, q.price);
+    else if (q.changePct >= s.momentumPct) addAlert(uid, sym, 'BUY·MOMENTUM', `BUY PING — ${sym} momentum alert — ${sym} is ripping +${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)} — past your ${s.momentumPct}% momentum level.`, q.price);
   }
   for (const p of positionsOf(uid)) {
     const q = quotes[p.symbol]; if (!q) continue;
@@ -828,52 +841,98 @@ function evaluatePings(uid, quotes) {
     const isShort = p.shares < 0;
     const chg = isShort ? ((p.avg_cost - q.price) / p.avg_cost) * 100 : ((q.price - p.avg_cost) / p.avg_cost) * 100;
     const heldLabel = isShort ? `you're short ${Math.abs(p.shares)} shares` : `you're holding ${p.shares} shares`;
-    if (s.sellPings !== false && !isShort && q.changePct <= -4) addAlert(uid, p.symbol, 'SELL WATCH', `${p.symbol} is down ${q.changePct.toFixed(2)}% today — watch it, ${heldLabel} — $${q.price}`, q.price);
-    if (s.sellPings !== false && isShort && q.changePct >= 4) addAlert(uid, p.symbol, 'SHORT WATCH', `${p.symbol} is up ${q.changePct.toFixed(2)}% today — rising against your short, ${heldLabel} — $${q.price}`, q.price);
+    // Sell/short warns only fire while the position is still ABOVE its
+    // stop line — once the stop ping has fired, the warn is noise.
+    if (s.sellPings !== false && !isShort && q.changePct <= -4 && chg > style.stop) addAlert(uid, p.symbol, 'SELL WATCH', `SELL WATCH — ${p.symbol} dropping hard today — You hold ${p.symbol} and it's down ${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)}. Worth a look before it reaches your stop.`, q.price);
+    if (s.sellPings !== false && isShort && q.changePct >= 4 && chg > style.stop) addAlert(uid, p.symbol, 'SHORT WATCH', `SHORT WATCH — ${p.symbol} ripping against your short — ${p.symbol} is up +${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)} — rising against your short (${heldLabel}). Worth a look before it reaches your stop.`, q.price);
     if (s.stopTargetPings !== false) {
       // One line only: the style's own stop/target. The old code also fired
       // hardcoded -5%/+10% lines under the same SELL·STOP / SELL·TARGET
       // kinds, so for Swing (-8%) the -5% line fired first and the style
       // line never produced its own ping. (Day style IS -5%/+10%, so its
       // players see no change.)
-      if (chg <= style.stop) addAlert(uid, p.symbol, 'SELL·STOP', `${p.symbol} hit your ${style.label} stop ${style.stop}% (${chg.toFixed(2)}% vs your cost) — $${q.price}`, q.price);
-      if (chg >= style.target) addAlert(uid, p.symbol, 'SELL·TARGET', `${p.symbol} hit your ${style.label} target +${style.target}% (${chg.toFixed(2)}% vs your cost) — $${q.price}`, q.price);
+      if (chg <= style.stop) addAlert(uid, p.symbol, 'SELL·STOP', `${isShort ? 'COVER' : 'SELL'} PING — ${p.symbol} hit your ${style.stop}% stop — ${p.symbol} is ${chg.toFixed(2)}% vs your $${p.avg_cost.toFixed(2)} ${isShort ? 'short avg' : 'avg'} — ${heldLabel}. Your ${style.label} style rule says ${isShort ? 'cover it' : 'cut it'}.`, q.price);
+      else if (chg >= style.target) addAlert(uid, p.symbol, 'SELL·TARGET', `${isShort ? 'COVER' : 'SELL'} PING — ${p.symbol} hit your +${style.target}% target — ${p.symbol} is +${chg.toFixed(2)}% vs your $${p.avg_cost.toFixed(2)} ${isShort ? 'short avg' : 'avg'} — ${heldLabel}. Your ${style.label} style rule says take profit.`, q.price);
     }
   }
 }
-async function researchPass(sym, quotes) {
+async function researchPass(sym, quotes, styleKey = 'day') {
+  // Before any entry, every candidate gets researched: fresh news plus
+  // trend stats measured on the window the style trades (intraday bars
+  // for scalping, daily closes for the rest). The stats string is what
+  // the combined RESEARCH log entry shows; the trend sentence is what
+  // the Predictor shows as its trend key point.
   let trend = '';
-  let chg5 = 0, chg20 = 0;
-  try {
-    const h = await fetchHistory(sym, '1M');
-    const closes = h.points.map(p => p.c);
-    if (closes.length >= 20) { const c5 = closes.slice(-5), c20 = closes.slice(-20); const avg = a => a.reduce((x, y) => x + y, 0) / a.length; chg5 = ((closes[closes.length - 1] - c5[0]) / c5[0]) * 100; chg20 = ((closes[closes.length - 1] - c20[0]) / c20[0]) * 100; trend = `Change over the last 5 days ${chg5 >= 0 ? '+' : ''}${chg5.toFixed(1)}% (5-day avg $${avg(c5).toFixed(2)}), change over the last 20 days ${chg20 >= 0 ? '+' : ''}${chg20.toFixed(1)}% (20-day avg $${avg(c20).toFixed(2)}), last $${closes[closes.length - 1].toFixed(2)}.`; }
-  } catch { trend = 'Trend history unavailable.'; }
+  let stats = '';
+  let near = 0, far = 0; // the style's short window (15m burst / 5 sessions) and long window (last hour / 20 sessions)
+  const dayChg = quotes[sym]?.changePct ?? 0;
+  if (styleKey === 'scalping') {
+    try {
+      const h = await fetchHistory(sym, '1D');
+      const closes = h.points.filter(p => !p.f).map(p => p.c);
+      const m15 = pctOver(closes, 15), m60 = pctOver(closes, 60);
+      stats = `intraday: ${fmtSignedPct(m15)} last 15m · ${fmtSignedPct(m60)} last hour · ${fmtSignedPct(dayChg)} today`;
+      near = m15 ?? 0; far = m60 ?? 0;
+      trend = closes.length ? `Change over the last 15 minutes ${fmtSignedPct(m15)}, last hour ${fmtSignedPct(m60)}, last $${closes[closes.length - 1].toFixed(2)}.` : 'Trend history unavailable.';
+    } catch { trend = 'Trend history unavailable.'; stats = `intraday: n/a last 15m · n/a last hour · ${fmtSignedPct(dayChg)} today`; }
+  } else {
+    try {
+      const h = await fetchHistory(sym, '1M');
+      const closes = h.points.map(p => p.c);
+      const c5 = pctOver(closes, 5), c20 = pctOver(closes, 20), c60 = pctOver(closes, 60);
+      stats = `trend: ${fmtSignedPct(c5)} / 5 sessions · ${fmtSignedPct(c20)} / 20 sessions · ${fmtSignedPct(c60)} / ~60 sessions · ${fmtSignedPct(dayChg)} today`;
+      near = c5 ?? 0; far = c20 ?? 0;
+      if (closes.length >= 20) {
+        const c5a = closes.slice(-5), c20a = closes.slice(-20);
+        const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+        trend = `Change over the last 5 days ${c5 >= 0 ? '+' : ''}${c5.toFixed(1)}% (5-day avg $${avg(c5a).toFixed(2)}), change over the last 20 days ${c20 >= 0 ? '+' : ''}${c20.toFixed(1)}% (20-day avg $${avg(c20a).toFixed(2)}), last $${closes[closes.length - 1].toFixed(2)}.`;
+      } else trend = 'Trend history unavailable.';
+    } catch { trend = 'Trend history unavailable.'; stats = `trend: n/a / 5 sessions · n/a / 20 sessions · n/a / ~60 sessions · ${fmtSignedPct(dayChg)} today`; }
+  }
   const news = await fetchNews([sym]);
   const headlines = news.slice(0, 3).map(n => n.title);
-  // Real research score 0–100 (M15 — the old "strongest research score"
-  // was fiction, research was never scored): 5-day momentum counts double,
-  // 20-day momentum once, fresh headlines add a little. 50 is flat.
-  const score = Math.max(0, Math.min(100, Math.round(50 + chg5 * 2 + chg20 + Math.min(3, headlines.length) * 2)));
-  return { trend, headlines, score };
+  // Real research score 0–100: the short window's momentum counts double,
+  // the long window once, fresh headlines add a little. 50 is flat — this
+  // is the number rules mode ranks candidates by, so a dip into a
+  // collapsing trend scores low instead of winning on raw move size alone.
+  const score = Math.max(0, Math.min(100, Math.round(50 + near * 2 + far + Math.min(3, headlines.length) * 2)));
+  return { trend, stats, headlines, score };
 }
 async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null } = {}) {
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
   if (!user) return { ran: false };
   const s = effectiveSettings(uid, user);
   const saver = !!s.creditSaver;
+  const styleKey = s.style in STYLES ? s.style : 'day';
+  const style = STYLES[styleKey];
+  const setLA = text => setLastAction(uid, text);
+  const latestLogKind = () => db.prepare('SELECT kind FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1').get(uid)?.kind || null;
+  // A routine "checked" row is only logged when the latest log entry
+  // isn't already one — otherwise every 30 s check floods the log with
+  // identical rows.
+  const logCheckDeduped = msg => { if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', msg); };
   // Credit Saver blocks ALL auto trading outside market hours — including a
   // manual "Run a Check Now". The old !manual exemption let a manual run
   // trade after the early close while Saver was on, which is exactly what
-  // the Saver is supposed to prevent.
-  if (saver && !isMarketHours()) { logAuto(uid, 'CHECK', 'Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no auto runs while it is closed'); return { ran: true, action: 'waiting-market-hours' }; }
-  const rawQuotes = presetQuotes || await fetchLiveQuotes(boardSymbols(uid).all);
+  // the Saver is supposed to prevent. No log row for this: the status line
+  // says why, and the next due check picks trading back up.
+  if (saver && !isMarketHours()) { setLA('Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no AI runs while it\'s closed.'); return { ran: true, action: 'waiting-market-hours' }; }
+  let rawQuotes;
+  try { rawQuotes = presetQuotes || await fetchLiveQuotes(boardSymbols(uid).all); }
+  catch { rawQuotes = cachedQuotes(); }
+  if (!rawQuotes || !Object.keys(rawQuotes).length) { setLA('Waiting for the first live quotes…'); return { ran: true, action: 'waiting-quotes' }; }
   const quotes = effectiveQuotesFor(uid, rawQuotes);
   evaluatePings(uid, quotes);
-  if (!s.autoOn && !manual) return { ran: true, action: 'auto-off' };
-  const style = STYLES[s.style] || STYLES.day;
-  let soldCount = 0;
-  if (s.autoSell !== false) for (const p of positionsOf(uid)) { // Exits cover everything held, incl. custom picks
+  // A manual "Run a check now" does nothing while auto trading is off —
+  // the cycle returns false when disabled, so a manual click never trades
+  // behind the player's back. The old code ran a full cycle (trades
+  // included) on a manual click even with auto off.
+  if (!s.autoOn) { setLA('Auto trading is off — flip it on and Verity AI starts watching the tape.'); return { ran: true, action: 'auto-off' }; }
+  let lastAction = '';
+  // 1) Exits — at the chosen style's stop / target lines. EVERY position
+  // sitting on its line exits this cycle — exits are risk control, not new
+  // trades, so the daily entry cap never leaves one stranded.
+  if (s.autoSell !== false) for (const p of positionsOf(uid)) {
     const q = quotes[p.symbol]; if (!q) continue;
     // Gain vs cost — flipped for shorts, so the same stop/target lines
     // work: a short exits when the price rises past its stop or falls to
@@ -881,65 +940,150 @@ async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null }
     const isShort = p.shares < 0;
     const chg = isShort ? ((p.avg_cost - q.price) / p.avg_cost) * 100 : ((q.price - p.avg_cost) / p.avg_cost) * 100;
     if (chg <= style.stop || chg >= style.target) {
-      if (isShort) {
-        applyTrade(uid, p.symbol, 'buy', Math.abs(p.shares), q.price, 'auto-' + s.style);
-        logAuto(uid, 'SELL', `Covered short ${Math.abs(p.shares)} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}% vs short price, ${s.style} ${style.stop}%/${style.target}%)`, { symbol: p.symbol, shares: Math.abs(p.shares), price: q.price });
-        if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-cover: ${p.symbol}`, `Covered short ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
-      } else {
-        applyTrade(uid, p.symbol, 'sell', p.shares, q.price, 'auto-' + s.style);
-        logAuto(uid, 'SELL', `Sold ${p.shares} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}% vs cost, ${s.style} ${style.stop}%/${style.target}%)`, { symbol: p.symbol, shares: p.shares, price: q.price });
-        if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-sell: ${p.symbol}`, `Sold ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
-      }
-      soldCount += 1; // M16: keep going — exit EVERY position on its line this cycle, not just the first
+      const isStop = chg <= style.stop;
+      const line = isStop ? `${style.stop}% stop` : `+${style.target}% target`;
+      const done = applyTrade(uid, p.symbol, isShort ? 'buy' : 'sell', Math.abs(p.shares), q.price, 'auto-' + styleKey);
+      if (done.error) continue; // position changed mid-cycle — skip it
+      const pnl = done.pnl ?? 0;
+      const sharesOut = Math.abs(p.shares);
+      logAuto(uid, 'SELL', `${isShort ? 'AUTO COVER' : 'AUTO SELL'} — ${p.symbol} hit the ${style.label} ${line} — ${isShort ? 'Covered' : 'Sold'} all ${sharesOut} sh @ $${q.price.toFixed(2)} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% vs your $${p.avg_cost.toFixed(2)} ${isShort ? 'short avg' : 'avg'}) for $${(sharesOut * q.price).toFixed(2)}. Realized P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}. ${style.label} style ${isStop ? 'stop-loss' : 'take-profit'} line, executed by the auto trader.`, { symbol: p.symbol, shares: sharesOut, price: q.price });
+      if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-${isShort ? 'cover' : 'sell'}: ${p.symbol}`, `${isShort ? 'Covered short' : 'Sold'} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
+      lastAction = `${isShort ? 'Covered' : 'Sold'} ${p.symbol} at the ${style.label} ${line}`;
     }
   }
-  if (soldCount) return { ran: true, action: 'sold', count: soldCount }; // no buy this cycle after exits
-  const et = etDate(); // day cap counts in America/New_York, not UTC
+  // Exits count toward today's trades too — refresh the entry budget now
+  // that this cycle's exits are on the log. Exits must not block entries:
+  // if the cap still allows a buy after the exits, this cycle buys.
+  const et = etDate();
   const [dayStart, dayEnd] = etDayBounds(et.year, et.month, et.day);
-  const tradesToday = db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND source LIKE 'auto%' AND created_at>=? AND created_at<?").get(uid, dayStart, dayEnd).c;
-  if (tradesToday >= s.maxTradesPerDay) { logAuto(uid, 'CHECK', `Checked — no trade (daily cap ${s.maxTradesPerDay} reached)`); return { ran: true, action: 'cap' }; }
-  if (positionsOf(uid).length >= s.maxPositions) { logAuto(uid, 'CHECK', 'Checked — no trade (max positions reached)'); return { ran: true, action: 'max-pos' }; }
-  const signals = [];
-  for (const sym of TICKERS) { // Entries stay on the core 12
-    const q = quotes[sym]; if (!q) continue;
-    if (s.buyDips !== false && q.changePct <= s.dipPct) signals.push({ sym, score: Math.abs(q.changePct), kind: 'dip', chg: q.changePct });
-    if (s.buyMomentum !== false && q.changePct >= s.momentumPct) signals.push({ sym, score: q.changePct, kind: 'momentum', chg: q.changePct });
+  const tradesTodayNow = () => db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND source LIKE 'auto%' AND created_at>=? AND created_at<?").get(uid, dayStart, dayEnd).c;
+  const tradesLeft = s.maxTradesPerDay - tradesTodayNow();
+  // 2) Candidates — the signals depend on the style. Scalping reads the
+  // intraday bars; swing / position read daily closes for every non-held
+  // ticker; day trading uses today's move (the Pings lines). Entries stay
+  // on the core 12 and never on a ticker already held.
+  if (tradesLeft > 0 && (s.buyDips !== false || s.buyMomentum !== false)) {
+    const heldRows = positionsOf(uid);
+    const held = new Set(heldRows.map(p => p.symbol));
+    if (heldRows.length < s.maxPositions) {
+      const signals = [];
+      const pushSig = (sym, signal, strength, kind, chg) => signals.push({ sym, signal, score: strength, kind, chg });
+      if (styleKey === 'scalping') {
+        for (const sym of TICKERS) {
+          if (held.has(sym)) continue;
+          const q = quotes[sym]; if (!q || !q.price) continue;
+          let closes = [];
+          try { const h = await fetchHistory(sym, '1D'); closes = h.points.filter(p => !p.f).map(p => p.c); } catch {}
+          const m15 = pctOver(closes, 15);
+          if (m15 == null) continue;
+          if (s.buyMomentum !== false && m15 >= 0.5) pushSig(sym, `intraday burst ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'momentum', m15);
+          else if (s.buyDips !== false && m15 <= -0.6) pushSig(sym, `intraday dip ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'dip', m15);
+        }
+      } else if (styleKey === 'swing' || styleKey === 'position') {
+        const unheld = TICKERS.filter(sym => !held.has(sym));
+        const settled = await Promise.allSettled(unheld.map(async sym => ({ sym, h: await fetchHistory(sym, '1M') })));
+        for (const r of settled) {
+          if (r.status !== 'fulfilled') continue;
+          const { sym, h } = r.value;
+          const q = quotes[sym]; if (!q || !q.price) continue;
+          const closes = h.points.map(p => p.c);
+          const c5 = pctOver(closes, 5), c20 = pctOver(closes, 20), c60 = pctOver(closes, 60);
+          if (styleKey === 'swing') {
+            if (s.buyDips !== false && c5 != null && c5 <= -5 && c20 != null && c20 >= 0) pushSig(sym, `pullback ${fmtSignedPct(c5)} / 5 sessions inside a ${fmtSignedPct(c20)} / 20-session uptrend`, Math.abs(c5) + Math.abs(c20), 'dip', c5);
+            else if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c5 != null && c5 >= 0) pushSig(sym, `trend breakout ${fmtSignedPct(c20)} / 20 sessions`, Math.abs(c20), 'momentum', c20);
+          } else {
+            if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c60 != null && c60 >= 0) pushSig(sym, `long-trend strength ${fmtSignedPct(c20)} / 20 · ${fmtSignedPct(c60)} / ~60 sessions`, Math.abs(c20) + Math.abs(c60), 'momentum', c20);
+            else if (s.buyDips !== false && c20 != null && c20 <= -10 && c60 != null && c60 >= 0) pushSig(sym, `deep pullback ${fmtSignedPct(c20)} / 20 sessions in a ${fmtSignedPct(c60)} long uptrend`, Math.abs(c20), 'dip', c20);
+          }
+        }
+      } else {
+        for (const sym of TICKERS) {
+          if (held.has(sym)) continue;
+          const q = quotes[sym]; if (!q) continue;
+          if (s.buyDips !== false && q.changePct <= s.dipPct) pushSig(sym, `dip ${q.changePct.toFixed(2)}% today`, Math.abs(q.changePct), 'dip', q.changePct);
+          else if (s.buyMomentum !== false && q.changePct >= s.momentumPct) pushSig(sym, `momentum +${q.changePct.toFixed(2)}% today`, q.changePct, 'momentum', q.changePct);
+        }
+      }
+      const gameNow = getGame(uid);
+      if (signals.length > 0 && gameNow.cash > 0) {
+        // 3) Research pass — news + trend stats, logged as ONE entry
+        // before any decision so the reasoning is on the record. With
+        // Credit Saver in effect only the single strongest signal is
+        // researched — every other check is rules-only and never touches
+        // the AI or the news search; with the owner's saver off, up to
+        // four candidates get the full pass.
+        const shortlist = [...signals].sort((a, b) => b.score - a.score).slice(0, saver ? 1 : 4);
+        const research = new Map();
+        for (const c of shortlist) {
+          try { research.set(c.sym, await researchPass(c.sym, quotes, styleKey)); } catch { /* research is best-effort per name */ }
+        }
+        if (research.size > 0) {
+          const lines = shortlist.filter(c => research.has(c.sym)).map(c => {
+            const r = research.get(c.sym);
+            return `${c.sym}: research score ${r?.score ?? 0}/100 — ${r?.stats ?? ''}${r?.headlines?.length ? ` · news: ${r.headlines.join(' · ')}` : ' · news: nothing fresh found'}`;
+          });
+          logAuto(uid, 'RESEARCH', `RESEARCH — ${style.label} pass on ${[...research.keys()].join(', ')} — ${lines.join(' | ')}`);
+        }
+        const researchText = c => {
+          const r = research.get(c.sym);
+          return r ? `score ${r.score}/100 · ${r.stats}${r.headlines?.length ? `; news: ${r.headlines.join(' · ')}` : '; no fresh news found'}` : 'research unavailable';
+        };
+        // 4) Decision — AI reads the research, or rules take the
+        // strongest research score. AI mode with no AI available falls
+        // back to rules (the standalone has no guaranteed AI key).
+        let pick = null, reason = '';
+        if (s.autoMode === 'ai') {
+          const tape = shortlist.map(c => `${c.sym} (${NAMES[c.sym] || c.sym}): $${quotes[c.sym].price.toFixed(2)} — signal: ${c.signal} — research: ${researchText(c)}`).join('\n');
+          const heldText = heldRows.length > 0 ? heldRows.map(p => `${p.symbol} ${p.shares} sh @ $${p.avg_cost.toFixed(2)}`).join(', ') : 'none';
+          const prompt = `You are the auto trader inside a paper-trading simulator ($100K fake cash, real live prices). The player turned you ON, picked the ${style.label} style, and gave you these rules: at most $${s.budgetPerBuy.toFixed(0)} per buy, at most ${s.maxPositions} open positions, typical hold ${style.hold}.${saver ? ' Credit Saver is ON: cheap rules checks run every 30 seconds and you are woken ONLY when a real signal fires during market hours, to keep AI usage low — be selective, passing costs nothing and there are at most 2 auto trades today.' : ''}\n\n${style.brief}\n\nYou already ran a research pass on the ${shortlist.length} strongest signal(s) — fresh news headlines and trend stats are included below. Weigh the RESEARCH, not just the raw signal: bad fresh news or a trend fighting the signal is a reason to pass. Pick the SINGLE best one to buy right now, or pass if none of them look worth it — passing is a real option, don't force a trade. Give a one or two sentence reason the player will read in the activity log, and cite the research (a trend number or a headline) that decided it.\n\nSIGNALS + RESEARCH:\n${tape}\n\nCash available: $${gameNow.cash.toFixed(2)}. Currently holding: ${heldText}.\n\nAnswer ONLY with BUY <SYMBOL> or PASS and one short reason.`;
+          const ai = await aiDecide(prompt);
+          if (ai) {
+            const m = ai.match(/BUY\s+([A-Z][A-Z0-9-]*)/i);
+            if (m && shortlist.some(c => c.sym === m[1].toUpperCase())) { pick = shortlist.find(c => c.sym === m[1].toUpperCase()); reason = 'Verity AI: ' + ai.slice(0, 200); }
+            else if (/^\s*BUY/i.test(ai)) { pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null; reason = 'Verity AI: ' + ai.slice(0, 200); }
+            else reason = 'Verity AI: ' + ai.slice(0, 200);
+          } else {
+            pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
+            if (pick) reason = `AI unavailable (no AI key configured) — rules fallback: strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
+          }
+        }
+        if (!pick && s.autoMode === 'rules') {
+          pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
+          if (pick) reason = `Strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
+        }
+        if (pick) {
+          const q = quotes[pick.sym];
+          // Size to what the player can actually afford: the budget or
+          // 95% of their cash, whichever is smaller — an account with less
+          // cash than the budget used to fail every check with "not
+          // enough cash" forever.
+          const budget = Math.min(s.budgetPerBuy, gameNow.cash * 0.95);
+          const shares = Math.max(0.01, Math.floor((budget / q.price) * 100) / 100);
+          if (shares * q.price < 0.01) { logCheckDeduped(`Checked — no trade — not enough cash for even 0.01 shares of ${pick.sym}`); lastAction = 'Checked — no trade'; }
+          else {
+            const r = applyTrade(uid, pick.sym, 'buy', shares, q.price, 'auto-' + styleKey);
+            if (r.error) { logCheckDeduped(`Checked — no trade — ${r.error}`); lastAction = 'Checked — no trade'; }
+            else {
+              logAuto(uid, 'BUY', `AUTO BUY — ${pick.sym} (${pick.signal}) — Bought ${shares} sh @ $${q.price.toFixed(2)} for $${(shares * q.price).toFixed(2)} of paper cash. ${reason} Research: ${researchText(pick)}. ${style.label} guardrails on it now: auto-sell at $${(q.price * (1 + style.stop / 100)).toFixed(2)} (${style.stop}%) or $${(q.price * (1 + style.target / 100)).toFixed(2)} (+${style.target}%).`, { symbol: pick.sym, shares, price: q.price });
+              if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-buy: ${pick.sym}`, `Bought ${shares} ${pick.sym} @ $${q.price}. ${reason}`);
+              lastAction = `Bought ${pick.sym} — ${pick.signal}`;
+            }
+          }
+        } else if (reason) {
+          lastAction = `Researched ${shortlist.map(c => c.sym).join(', ')} — passed`;
+          if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', `Checked — passed after research — ${shortlist.map(c => `${c.sym} (${c.signal})`).join(', ')} flashed and got researched, but the auto trader passed. ${reason}`);
+        }
+      }
+    }
   }
-  signals.sort((a, b) => b.score - a.score);
-  if (!signals.length) { logAuto(uid, 'CHECK', 'Checked — no trade (no signals)'); return { ran: true, action: 'no-signal' }; }
-  // Research pass before any buy: up to 4 candidates, only 1 under Credit Saver.
-  const candidates = saver ? signals.slice(0, 1) : signals.slice(0, 4);
-  const researched = [];
-  for (const sig of candidates) {
-    const res = await researchPass(sig.sym, quotes);
-    logAuto(uid, 'RESEARCH', `${sig.sym}: research score ${res.score}/100 — ${res.trend} Headlines: ${res.headlines.join(' | ') || 'none found'}`, { symbol: sig.sym });
-    researched.push({ ...sig, research: res, score: res.score });
+  if (!lastAction) {
+    lastAction = 'Checked — no trade';
+    logCheckDeduped(`Checked — no trade — No position sitting at the ${style.label} ${style.stop}% / +${style.target}% lines and no new ${style.label.toLowerCase()} signal strong enough to research. Still watching.`);
   }
-  researched.sort((a, b) => b.score - a.score); // strongest research score wins, not just the biggest % move
-  const best = researched[0];
-  let decision = 'buy', reason = `${best.kind} signal ${best.chg.toFixed(1)}% (research score ${best.score}/100)`;
-  if (s.autoMode === 'ai') {
-    const q = quotes[best.sym];
-    const prompt = `Paper-trading decision. Ticker ${best.sym} (${NAMES[best.sym]}), live price $${q.price}, day change ${q.changePct.toFixed(2)}%, signal ${best.kind} ${best.chg.toFixed(1)}%, style ${style.label} (${style.stop}% stop / +${style.target}% target). Trend: ${best.research.trend} Headlines: ${best.research.headlines.join('; ') || 'none'}. Answer ONLY with BUY or PASS and one short reason.`;
-    const ai = await aiDecide(prompt);
-    if (ai) { decision = /^\s*BUY/i.test(ai) ? 'buy' : 'pass'; reason = 'AI: ' + ai.slice(0, 200); }
-    else reason = 'AI unavailable (no AI_API_KEY configured) — rules fallback: ' + reason;
-  }
-  if (decision === 'pass') { logAuto(uid, 'PASS', `${best.sym} passed — ${reason}`, { symbol: best.sym }); return { ran: true, action: 'pass' }; }
-  const q = quotes[best.sym];
-  // C6: size to what the player can actually afford — the old code sized
-  // from budgetPerBuy alone, so every account with cash below the $10k
-  // default budget failed every check with "Not enough cash" forever.
-  const cash = getGame(uid).cash;
-  const budget = Math.min(s.budgetPerBuy, cash * 0.95);
-  const shares = Math.max(0.01, Math.floor((budget / q.price) * 100) / 100);
-  if (shares * q.price < 0.01) { logAuto(uid, 'CHECK', `Checked — no trade (not enough cash for even 0.01 shares of ${best.sym})`); return { ran: true, action: 'error' }; }
-  const r = applyTrade(uid, best.sym, 'buy', shares, q.price, 'auto-' + s.style);
-  if (r.error) { logAuto(uid, 'CHECK', `Checked — no trade (${r.error})`); return { ran: true, action: 'error' }; }
-  logAuto(uid, 'BUY', `Bought ${shares} ${best.sym} @ $${q.price} — ${reason}`, { symbol: best.sym, shares, price: q.price });
-  if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-buy: ${best.sym}`, `Bought ${shares} ${best.sym} @ $${q.price}. ${reason}`);
-  return { ran: true, action: 'bought', symbol: best.sym };
+  setLA(lastAction);
+  return { ran: true, action: lastAction.startsWith('Bought') ? 'bought' : (lastAction.startsWith('Sold') || lastAction.startsWith('Covered')) ? 'sold' : lastAction.startsWith('Researched') ? 'pass' : 'no-trade' };
 }
+
 // H7: the cycle ticks every 30 s (the fastest check step) and each player's
 // auto trader runs only when their own checkSeconds interval is due — the
 // old code hardcoded a 2-minute interval and never read checkSeconds at all.
@@ -1102,7 +1246,7 @@ function publicState(uid, opts = {}) {
     autoLog: db.prepare('SELECT * FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     predictorChats: db.prepare('SELECT * FROM predictor_chats WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(uid),
     ...predictorLimitInfo(uid, user), // predictorLimit / Used / Remaining / Unlimited (AI asks only)
-    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), sessionHours, discordInviteUrl: DISCORD_INVITE_URL,
+    settings: s, creditSaverForced: !user.is_owner, creditSaverEffective: !!s.creditSaver, session: marketSession(), marketLabel: etLabel(), sessionHours, discordInviteUrl: DISCORD_INVITE_URL,
     league: { tier: leagueTier, tierName: LEAGUE_TIERS[leagueTier].name, tierColor: LEAGUE_TIERS[leagueTier].color, weeklyPct: Math.round(leagueWeeklyPct * 100) / 100, lastResult: leagueRow?.last_result || '', lastResultKind: leagueRow?.last_result_kind || '' }, donateUrl: DONATE_URL,
     feedback: user.is_owner ? db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT 100').all() : undefined,
     players: db.prepare('SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = \'\' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at').all(),
@@ -1368,6 +1512,7 @@ app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id,
 app.post('/api/auth/register', rateLimit, async (req, res) => {
   const { name, pin, email, startCash } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Enter your name' });
+  if (String(name).trim().length < 2) return res.status(400).json({ error: 'Pick a name with at least 2 characters.' });
   if (String(name).trim().length > 30) return res.status(400).json({ error: 'Name is too long (max 30 characters)' }); // L5
   if (pin && String(pin).length < 6) return res.status(400).json({ error: 'PIN must be at least 6 characters' }); // H5
   // Starting cash is chosen at sign-up ($100–$10,000,000, default $100,000).
@@ -2012,6 +2157,10 @@ app.post('/api/settings', auth, (req, res) => {
   if (req.user.is_owner && s.creditSaver && body.maxTradesPerDay != null) s.savedMaxTradesPerDay = s.maxTradesPerDay;
   if (req.user.is_owner && s.creditSaver && body.checkSeconds != null) s.savedCheckSeconds = s.checkSeconds;
   saveSettings(req.user.id, s);
+  // Turning auto trading on runs a first check right away; turning it off
+  // records the off-state in the status line.
+  if (body.autoOn === true && !prev.autoOn) runAutoCycle(req.user.id, { manual: true }).catch(() => {});
+  if (body.autoOn === false) { const s2 = getSettings(req.user.id); s2.lastAction = 'Auto trading is off — flip it on and Verity AI starts watching the tape.'; saveSettings(req.user.id, s2); }
   res.json({ ok: true, settings: effectiveSettings(req.user.id, req.user), creditSaverForced: !req.user.is_owner });
 });
 app.post('/api/auto/run', auth, async (req, res) => {
