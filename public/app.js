@@ -14,6 +14,21 @@ let tradeSide = 'buy', orderSide = 'buy', lastChartLoad = 0, lastNewsLoad = 0, r
 let notifiedIds = new Set(), prevPrices = {}, bannerAlertId = null, authMode = 'signin', claimName = '';
 let wlSearch = '', wlSort = 'default', tradeInFlight = false, predMode = 'ai';
 let leagueData = null, leagueCountdownTimer = null;
+// Inline SVG icons (stroke style, currentColor so themes recolor them).
+// Used by JS-rendered rows; static HTML inlines the same paths directly.
+const ICONS = {
+  flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
+  circle: '<circle cx="12" cy="12" r="9"/>',
+  heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  trophy: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>',
+  target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  trendUp: '<polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/>',
+  trendDown: '<polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/>'
+};
+function icon(name, cls) { return `<svg class="${cls || 'ic'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`; }
 // Predictor daily limit (AI mode only): standard members get 2 Verity AI
 // questions per ET day; rules-only questions are unlimited and never
 // counted; the owner is unlimited in both modes. updatePredLimit() keeps
@@ -341,7 +356,7 @@ function renderPredChips() {
 function updatePredCurrent() {
   const q = quotes[chartSymbol];
   const held = (state?.positions || []).find(p => p.symbol === chartSymbol);
-  $('btn-ask').textContent = 'ASK ABOUT ' + chartSymbol;
+  $('btn-ask').innerHTML = icon('target') + ' ASK ABOUT ' + chartSymbol;
   $('link-ask-predictor').textContent = 'Ask the Predictor about ' + chartSymbol + ' →';
   if (!q) { $('pred-current').textContent = chartSymbol + ' — ' + symName(chartSymbol) + ' · price loading…'; return; }
   $('pred-current').textContent = `${chartSymbol} — ${symName(chartSymbol)} · ${money(q.price)} (${pct(q.changePct)} today, ${pct(q.extChangePct)} extended)${held ? (held.shares < 0 ? ` · You SHORT ${Math.abs(held.shares)} @ ${money(held.avg_cost)}` : ` · You hold ${held.shares} @ ${money(held.avg_cost)}`) : ' · You hold none'}`;
@@ -389,14 +404,14 @@ async function loadChallenges(force) {
 function renderChallenges() {
   const el = $('challenges-list'); if (!el || !challengesData) return;
   const d = challengesData;
-  const flame = $('challenges-streak'); if (flame) flame.textContent = `🔥 ${d.streak}-DAY STREAK · ${d.xp} XP`;
+  const flame = $('challenges-streak'); if (flame) flame.innerHTML = `${icon('flame')} ${d.streak}-DAY STREAK · ${d.xp} XP`;
   const badge = $('streak-badge');
-  if (badge) { badge.textContent = d.streak > 0 ? `🔥 ${d.streak}-DAY STREAK` : '🔥 START A STREAK — TRADE OR FINISH A CHALLENGE TODAY'; badge.classList.remove('hidden'); }
+  if (badge) { badge.innerHTML = `${icon('flame')} ` + (d.streak > 0 ? `${d.streak}-DAY STREAK` : 'START A STREAK — TRADE OR FINISH A CHALLENGE TODAY'); badge.classList.remove('hidden'); }
   el.innerHTML = d.challenges.map(c => {
     const stateTxt = c.claimed ? '<span class="tag green">✓ CLAIMED +' + c.xp + ' XP</span>'
       : c.done ? `<button class="btn small primary" data-claim="${escapeHtml(c.key)}">CLAIM +${c.xp} XP</button>`
       : `<span class="muted small">${c.progress}/${c.goal}</span>`;
-    return `<div class="challenge-row"><span class="challenge-check">${c.done || c.claimed ? '✓' : '○'}</span><span><strong>${escapeHtml(c.title)}</strong><br><span class="muted small">${escapeHtml(c.desc)}</span></span><span class="spacer"></span>${stateTxt}</div>`;
+    return `<div class="challenge-row"><span class="challenge-check">${c.done || c.claimed ? icon('check', 'ic done') : icon('circle')}</span><span><strong>${escapeHtml(c.title)}</strong><br><span class="muted small">${escapeHtml(c.desc)}</span></span><span class="spacer"></span>${stateTxt}</div>`;
   }).join('');
   el.querySelectorAll('[data-claim]').forEach(b => b.onclick = async () => {
     b.disabled = true; b.textContent = 'CLAIMING…';
@@ -425,7 +440,7 @@ async function loadCoach() {
   try {
     const j = await api('/api/coach');
     if (j.empty) { el.innerHTML = '<p class="muted">No trades yet — make your first trade to get coaching.</p>'; return; }
-    el.innerHTML = j.observations.map(o => `<div class="coach-obs">${escapeHtml(o)}</div>`).join('') +
+    el.innerHTML = j.observations.map(o => `<div class="coach-obs">${icon('target', 'ic sm')} ${escapeHtml(o)}</div>`).join('') +
       `<p class="muted small">Based on ${j.stats.closed} closed trade${j.stats.closed === 1 ? '' : 's'} · win rate ${j.stats.winRate}% · avg win ${money(j.stats.avgWin)} · avg loss ${money(j.stats.avgLoss)}${j.stats.avgHoldHrs != null ? ` · avg hold ${j.stats.avgHoldHrs < 24 ? j.stats.avgHoldHrs + 'h' : (j.stats.avgHoldHrs / 24).toFixed(1) + ' days'}` : ''} · stops honoured ${j.stats.stopHonoured}/${j.stats.stopTotal}. Rules only — no AI involved.</p>`;
   } catch { el.innerHTML = '<p class="muted">Could not load coaching — try again.</p>'; }
 }
@@ -511,8 +526,8 @@ function fallbackCopy(txt, done) {
 function applyDonateLinks(url) {
   for (const id of ['donate-welcome', 'donate-sidebar']) {
     const el = $(id); if (!el) continue;
-    if (url) { el.href = url; el.target = '_blank'; el.rel = 'noopener'; el.removeAttribute('aria-disabled'); el.textContent = id === 'donate-welcome' ? 'DONATE ↗' : 'DONATE ↗'; }
-    else { el.removeAttribute('href'); el.removeAttribute('target'); el.setAttribute('aria-disabled', 'true'); el.textContent = 'DONATE — COMING SOON'; }
+    if (url) { el.href = url; el.target = '_blank'; el.rel = 'noopener'; el.removeAttribute('aria-disabled'); el.innerHTML = icon('heart') + ' DONATE ↗'; }
+    else { el.removeAttribute('href'); el.removeAttribute('target'); el.setAttribute('aria-disabled', 'true'); el.innerHTML = icon('heart') + ' DONATE — COMING SOON'; }
   }
 }
 
@@ -610,7 +625,7 @@ function renderLeagues() {
   if (!head || !leagueData) return;
   const lg = leagueData;
   const tierStyle = `color:${escapeHtml(lg.tierColor)}`;
-  head.innerHTML = `<p><span class="league-tier-name" style="${tierStyle}">◆ ${escapeHtml(lg.tierName).toUpperCase()} LEAGUE</span> <span class="muted small">· ${lg.leagueSize} player${lg.leagueSize === 1 ? '' : 's'} in your league · <span id="league-countdown">Week ends in ${escapeHtml(leagueCountdownText())}</span></span></p>${lg.you ? `<p>You're <b>#${lg.you.rank}</b> · <b class="${lg.you.weeklyPct >= 0 ? 'up' : 'down'}">${pct(lg.you.weeklyPct)} this week</b> · net worth ${money(lg.you.netWorth)}</p>` : ''}<p class="muted small">Ranked by this week's % return. <span class="up">Top ${lg.promoteCount} promote ▲</span> · <span class="down">Bottom ${lg.demoteCount} demote ▼</span> · the middle stays.</p>`;
+  head.innerHTML = `<p><span class="league-tier-name" style="${tierStyle}">${icon('trophy')} ${escapeHtml(lg.tierName).toUpperCase()} LEAGUE</span> <span class="muted small">· ${lg.leagueSize} player${lg.leagueSize === 1 ? '' : 's'} in your league · <span id="league-countdown">Week ends in ${escapeHtml(leagueCountdownText())}</span></span></p>${lg.you ? `<p>You're <b>#${lg.you.rank}</b> · <b class="${lg.you.weeklyPct >= 0 ? 'up' : 'down'}">${pct(lg.you.weeklyPct)} this week</b> · net worth ${money(lg.you.netWorth)}</p>` : ''}<p class="muted small">Ranked by this week's % return. <span class="up">Top ${lg.promoteCount} promote ▲</span> · <span class="down">Bottom ${lg.demoteCount} demote ▼</span> · the middle stays.</p>`;
   if (banner) {
     if (lg.lastResult) {
       const cls = lg.lastResultKind === 'promoted' ? 'up' : lg.lastResultKind === 'demoted' ? 'down' : '';
@@ -1055,9 +1070,8 @@ function updateTradeEstimates() {
   const pos0 = heldPosition(chartSymbol);
   // Button says what the trade actually does: SELL with no long position
   // opens a SHORT; BUY against a short COVERS it.
-  $('btn-trade-submit').textContent = tradeSide === 'buy'
-    ? (pos0 && pos0.shares < 0 ? 'COVER ' : 'BUY ') + chartSymbol
-    : (pos0 && pos0.shares > 0 ? 'SELL ' : 'SHORT ') + chartSymbol;
+  const submitVerb = tradeSide === 'buy' ? (pos0 && pos0.shares < 0 ? 'COVER ' : 'BUY ') : (pos0 && pos0.shares > 0 ? 'SELL ' : 'SHORT ');
+  $('btn-trade-submit').innerHTML = icon(tradeSide === 'buy' ? 'trendUp' : 'trendDown') + ' ' + submitVerb + chartSymbol;
   renderQuickSize();
   renderTradeSessionBanner();
   if (!q) { $('trade-est').textContent = 'Waiting for a live price…'; $('trade-cash-after').textContent = ''; $('trade-position-line').textContent = ''; return; }
@@ -1167,7 +1181,7 @@ function renderTrades() {
     const src = String(t.source || '');
     const kindTag = src.endsWith('-short') ? ' <span class="tag red">SHORT</span>' : src.endsWith('-cover') ? ' <span class="tag amber">COVER</span>' : '';
     const closed = !!t.pnl && ((t.side === 'sell' && !src.endsWith('-short')) || (t.side === 'buy' && src.endsWith('-cover')));
-    return `<div class="trade-row"><span class="chip ${t.side === 'buy' ? 'buy' : 'sell'}">${escapeHtml(String(t.side || '').toUpperCase())}</span>${kindTag} <strong>${escapeHtml(t.symbol)}</strong> · ${t.shares} shares @ ${money(t.price)} · ${money(t.total)} · ${fmtDT(t.created_at)} · ${escapeHtml(t.session || '')} · ${escapeHtml(t.source || '')}${t.pnl ? ` · Realized P&L <span class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</span>` : ''}${closed ? ` <button class="btn small" data-share-trade="${t.id}">SHARE ⤓ PNG</button><button class="btn small" data-copy-trade="${t.id}">COPY FOR DISCORD</button>` : ''}</div>`;
+    return `<div class="trade-row"><span class="chip ${t.side === 'buy' ? 'buy' : 'sell'}">${escapeHtml(String(t.side || '').toUpperCase())}</span>${kindTag} <strong>${escapeHtml(t.symbol)}</strong> · ${t.shares} shares @ ${money(t.price)} · ${money(t.total)} · ${fmtDT(t.created_at)} · ${escapeHtml(t.session || '')} · ${escapeHtml(t.source || '')}${t.pnl ? ` · Realized P&L <span class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</span>` : ''}${closed ? ` <button class="btn small" data-share-trade="${t.id}">${icon('download')} SHARE PNG</button><button class="btn small" data-copy-trade="${t.id}">${icon('copy')} COPY FOR DISCORD</button>` : ''}</div>`;
   }).join('');
   el.querySelectorAll('[data-share-trade]').forEach(b => b.onclick = () => { const t = (state.trades || []).find(x => x.id === +b.dataset.shareTrade); if (t) shareTradeCard(t); });
   el.querySelectorAll('[data-copy-trade]').forEach(b => b.onclick = () => { const t = (state.trades || []).find(x => x.id === +b.dataset.copyTrade); if (t) copyTradeText(t); });

@@ -69,8 +69,9 @@ h1,h2,h3{font-family:var(--display);font-weight:400;letter-spacing:.01em;margin-
 
 /* ---------- Tabs ---------- */
 .tabs{display:flex;gap:6px;padding:12px 18px 4px;background:var(--bg);flex-wrap:wrap;position:sticky;top:57px;z-index:30;max-width:1180px;margin:0 auto}
-.tab{background:var(--card);color:var(--text-2);border:1px solid var(--border);padding:9px 16px;border-radius:999px;cursor:pointer;font:inherit;font-weight:700;font-size:13px;letter-spacing:.04em}
-.tab:hover{border-color:var(--border-2);color:var(--text)}
+.tab{background:var(--card);color:var(--text-2);border:1px solid var(--border);padding:9px 16px;border-radius:999px;cursor:pointer;font:inherit;font-weight:700;font-size:13px;letter-spacing:.04em;display:inline-flex;align-items:center;gap:7px;transition:border-color .15s ease,background .15s ease,color .15s ease}
+.tab:hover{border-color:var(--accent);color:var(--text);background:var(--card-2)}
+.tab .ic{width:15px;height:15px}
 .tab.active{background:var(--accent);border-color:var(--accent);color:#06090a}
 .count{background:#ff4757;color:#fff;border-radius:999px;padding:0 7px;font-size:12px;margin-left:4px}
 .autodot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:5px;vertical-align:middle}
@@ -96,8 +97,8 @@ main{padding:14px 18px 40px;max-width:1180px;margin:0 auto}
 .new-badge{background:#ff4757;color:#fff;border-radius:999px;padding:0 7px;font-size:11px;font-weight:700;margin-left:6px}
 
 /* ---------- Buttons / inputs ---------- */
-.btn{background:var(--card-3);color:var(--text);border:1px solid var(--border-2);padding:9px 15px;border-radius:var(--radius);cursor:pointer;font:inherit;font-weight:700;font-size:14px}
-.btn:hover{border-color:var(--border-2);background:var(--card-3)}
+.btn{background:var(--card-3);color:var(--text);border:1px solid var(--border-2);padding:9px 15px;border-radius:var(--radius);cursor:pointer;font:inherit;font-weight:700;font-size:14px;display:inline-flex;align-items:center;justify-content:center;gap:7px;transition:border-color .15s ease,background .15s ease}
+.btn:hover{border-color:var(--accent);background:var(--card-3)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#06090a}
 .btn.primary:hover{background:var(--accent-soft)}
 .btn.big{padding:13px 24px;font-size:16px;width:100%}
@@ -320,3 +321,23 @@ footer{text-align:center;color:var(--muted);padding:22px;font-size:13px}
 button.chip{cursor:pointer;font:inherit}
 .modal-list{margin:10px 0 10px 20px;line-height:1.6}
 .style-card .style-desc{display:block;font-size:11px;line-height:1.4;margin-top:4px}
+
+/* ---------- Inline SVG icons (14–18px, stroke matches text) ---------- */
+.ic{width:16px;height:16px;flex:none;vertical-align:-3px}
+.ic.sm{width:14px;height:14px}
+.ic.lg{width:18px;height:18px}
+.card h2{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card h2 .ic{color:var(--accent)}
+.card h3{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.card h3 .ic{color:var(--accent)}
+.score-label{display:flex;align-items:center;gap:6px}
+.score-label .ic{width:14px;height:14px;color:var(--muted)}
+.side-nav .ic{width:16px;height:16px;color:var(--muted)}
+.side-nav button:hover .ic{color:var(--accent)}
+.challenge-check .ic{width:18px;height:18px;color:var(--muted)}
+.challenge-check .ic.done{color:var(--green-soft)}
+.coach-obs .ic{color:var(--accent);margin-right:6px}
+.welcome-list li .ic{color:var(--accent);margin-bottom:4px}
+.discord-btn .ic{width:16px;height:16px}
+.tag .ic{width:12px;height:12px;vertical-align:-2px}
+.league-tier-name .ic{width:20px;height:20px;vertical-align:-3px}
