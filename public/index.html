@@ -181,7 +181,7 @@
           <div id="range-btns" class="seg"><button data-range="1D" class="active">1D</button><button data-range="5D">5D</button><button data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="5Y">5Y</button></div>
           <div class="seg"><button id="chart-line" class="active">Line</button><button id="chart-candles">Candles</button></div>
         </div>
-        <canvas id="chart" width="760" height="300"></canvas>
+        <div class="chart-wrap"><canvas id="chart" width="760" height="300"></canvas><div id="chart-tip" class="chart-tip hidden"></div></div>
         <div class="legend"><span><i class="lg-accent"></i>Live price</span><span><i class="lg-grey"></i>Prev-close (dashed)</span><span><i class="lg-amber"></i>4 PM close (dashed)</span><span><i class="lg-amber"></i>Your avg (dotted)</span><span><i class="lg-purple"></i>Premarket / after-hours</span></div>
         <p id="chart-caption" class="muted small"></p>
         <p id="chart-ah-note" class="muted small">Purple shading on 1D = premarket (before 9:30 AM ET) and after-hours (after 4:00 PM ET). The grey dashed line is the previous close; the amber dashed line is the 4 PM close; the amber dotted line is your average cost when you hold the stock. Fills are at the LIVE extended price — never the close.</p>

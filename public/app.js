@@ -180,6 +180,7 @@ function renderCustomList() {
 // ---------- Chart ----------
 async function loadChart() {
   $('chart-error').classList.add('hidden');
+  hoverIdx = -1; const _tip = $('chart-tip'); if (_tip) _tip.classList.add('hidden');
   try { chartData = await api(`/api/history?symbol=${chartSymbol}&range=${chartRange}`); lastChartLoad = Date.now(); }
   catch (e) { $('chart-error').textContent = 'Chart is warming up — the feed didn\'t answer. '; const b = document.createElement('button'); b.className = 'btn small'; b.textContent = 'Retry'; b.onclick = loadChart; $('chart-error').appendChild(b); $('chart-error').classList.remove('hidden'); return; }
   const q = quotes[chartSymbol];
@@ -262,6 +263,55 @@ function drawChart() {
   const fmt = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   ctx.fillText(fmt(pts[0].t), 52, H - 12);
   ctx.fillText(fmt(pts[pts.length - 1].t), W - 150, H - 12);
+  // Hover state: crosshair + dot at the hovered bar, tooltip is a DOM div.
+  chartGeom = { pts, candles: chartData.candles || [], X, Y, W, H };
+  if (hoverIdx >= 0) {
+    const n = chartMode === 'candles' ? chartGeom.candles.length : pts.length;
+    const i = Math.max(0, Math.min(n - 1, hoverIdx));
+    const p = chartMode === 'candles' ? chartGeom.candles[i] : pts[i];
+    if (p) {
+      const x = chartMode === 'candles' ? 52 + (i + 0.5) / n * (W - 72) : X(i);
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = '#e8f0e9'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H - 32); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = accent(); ctx.beginPath(); ctx.arc(x, Y(p.c), 4, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#06090a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, Y(p.c), 4, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  bindChartHover();
+}
+let hoverIdx = -1, chartGeom = null;
+function bindChartHover() {
+  const cv = $('chart'), tip = $('chart-tip'); if (!cv || !tip || cv._hoverBound) return;
+  cv._hoverBound = true;
+  const fmtTip = t => new Date(t).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const showTip = e => {
+    if (!chartGeom) return;
+    const rect = cv.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (cv.clientWidth / rect.width);
+    const n = chartMode === 'candles' ? chartGeom.candles.length : chartGeom.pts.length;
+    if (!n) return;
+    const i = chartMode === 'candles'
+      ? Math.max(0, Math.min(n - 1, Math.floor((x - 52) / (chartGeom.W - 72) * n)))
+      : Math.max(0, Math.min(n - 1, Math.round((x - 52) / (chartGeom.W - 72) * (n - 1))));
+    const p = chartMode === 'candles' ? chartGeom.candles[i] : chartGeom.pts[i];
+    if (!p) return;
+    hoverIdx = i;
+    const px = chartMode === 'candles' ? 52 + (i + 0.5) / n * (chartGeom.W - 72) : chartGeom.X(i);
+    const py = chartGeom.Y(p.c);
+    tip.innerHTML = chartMode === 'candles'
+      ? `<b>${money(p.c)}</b><br>${fmtTip(p.t)}<br>O ${money(p.o)} · H ${money(p.h)} · L ${money(p.l)} · C ${money(p.c)}`
+      : `<b>${money(p.c)}</b><br>${fmtTip(p.t)}`;
+    tip.classList.remove('hidden');
+    // Keep the tooltip inside the chart: flip it left when near the right edge.
+    const tipW = tip.offsetWidth || 140;
+    tip.style.left = Math.max(4, Math.min(chartGeom.W - tipW - 4, px + 12)) + 'px';
+    tip.style.top = Math.max(4, py - 10) + 'px';
+    drawChart();
+  };
+  const hideTip = () => { if (hoverIdx === -1) return; hoverIdx = -1; tip.classList.add('hidden'); drawChart(); };
+  cv.addEventListener('pointermove', showTip);
+  cv.addEventListener('pointerleave', hideTip);
+  cv.addEventListener('pointerdown', showTip);
 }
 
 // ---------- Trade panel ----------
