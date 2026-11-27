@@ -828,16 +828,33 @@ function publicState(uid) {
   const netWorth = game.cash + positions.reduce((a, p) => a + p.price * p.shares, 0);
   const allTime = netWorth - (s.startCash || START_CASH);
   const allTimePct = (s.startCash || START_CASH) ? (allTime / (s.startCash || START_CASH)) * 100 : 0;
-  const openTodayChange = positions.reduce((a, p) => a + ((quotes[p.symbol]?.prevClose != null ? (p.price - quotes[p.symbol].prevClose) : 0) * p.shares), 0);
-  // Realised P&L from trades sold today (ET calendar day), on top of the
-  // open positions' move vs prev close — selling a winner still counts.
+  // Today change is measured vs yesterday's close (prevClose), so buying
+  // a stock today never books the move that happened before the buy, and
+  // selling today only books the move since yesterday's close. Open
+  // positions count (price - prevClose) * shares (negative shares for
+  // shorts flip the sign), then each of today's trades adjusts for the
+  // leg that opened/closed after prevClose.
+  const prevCloseOf = sym => quotes[sym]?.prevClose ?? null;
+  const openTodayChange = positions.reduce((a, p) => {
+    const pc = prevCloseOf(p.symbol);
+    return a + (pc != null ? (p.price - pc) * p.shares : 0);
+  }, 0);
   const etToday = etDate();
-  let realisedToday = 0;
-  for (const tr of db.prepare("SELECT pnl, created_at FROM trades WHERE user_id=? AND side='sell'").all(uid)) {
+  let todayAdjust = 0;
+  for (const tr of db.prepare('SELECT symbol, side, shares, price, source, created_at FROM trades WHERE user_id=?').all(uid)) {
     const d = etDate(new Date(tr.created_at));
-    if (d.year === etToday.year && d.month === etToday.month && d.day === etToday.day) realisedToday += tr.pnl || 0;
+    if (d.year !== etToday.year || d.month !== etToday.month || d.day !== etToday.day) continue;
+    const pc = prevCloseOf(tr.symbol);
+    if (pc == null) continue;
+    const src = String(tr.source || '');
+    const isCover = src.endsWith('-cover');
+    const isShort = src.endsWith('-short');
+    if (tr.side === 'buy' && !isCover) todayAdjust -= (tr.price - pc) * tr.shares; // buy long: remove the pre-purchase move
+    else if (tr.side === 'sell' && !isShort) todayAdjust += (tr.price - pc) * tr.shares; // sell long: keep only the move since prevClose
+    else if (tr.side === 'sell' && isShort) todayAdjust += (tr.price - pc) * tr.shares; // short opened today: same correction as a buy
+    else if (tr.side === 'buy' && isCover) todayAdjust += (pc - tr.price) * tr.shares; // cover: gain is prevClose falling to the cover price
   }
-  const todayChange = openTodayChange + realisedToday;
+  const todayChange = openTodayChange + todayAdjust;
   const todayPct = (netWorth - todayChange) ? (todayChange / (netWorth - todayChange)) * 100 : 0;
   let bestWorth = game.best_worth || 0;
   if (netWorth > bestWorth) { bestWorth = netWorth; db.prepare('UPDATE game SET best_worth=? WHERE user_id=?').run(bestWorth, uid); }

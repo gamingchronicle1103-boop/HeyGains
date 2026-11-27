@@ -621,13 +621,19 @@ function drawChart() {
     }
   }
   if (chartMode === 'line') {
-    const grad = ctx.createLinearGradient(0, 18, 0, H - 32); grad.addColorStop(0, accent() + '55'); grad.addColorStop(1, accent() + '00');
+    // Line colour follows the period's direction, not the theme accent:
+    // 1D compares the last price to prevClose; other ranges compare the
+    // last close to the first close. Green when the period is up, red
+    // when it's down.
+    const base = chartRange === '1D' ? (chartData.prevClose ?? pts[0].c) : pts[0].c;
+    const lineColor = pts[pts.length - 1].c >= base ? '#2bff88' : '#ff4757';
+    const grad = ctx.createLinearGradient(0, 18, 0, H - 32); grad.addColorStop(0, lineColor + '55'); grad.addColorStop(1, lineColor + '00');
     ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.c)) : ctx.moveTo(X(i), Y(p.c)));
     ctx.lineTo(X(pts.length - 1), H - 32); ctx.lineTo(X(0), H - 32); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
-    ctx.strokeStyle = accent(); ctx.lineWidth = 2; ctx.beginPath();
+    ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.beginPath();
     pts.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.c)) : ctx.moveTo(X(i), Y(p.c)));
     ctx.stroke();
-    const last = pts[pts.length - 1]; ctx.fillStyle = accent(); ctx.beginPath(); ctx.arc(X(pts.length - 1), Y(last.c), 3.5, 0, Math.PI * 2); ctx.fill();
+    const last = pts[pts.length - 1]; ctx.fillStyle = lineColor; ctx.beginPath(); ctx.arc(X(pts.length - 1), Y(last.c), 3.5, 0, Math.PI * 2); ctx.fill();
   } else {
     const candles = chartData.candles || [];
     const w = Math.max(2, (W - 72) / candles.length * 0.7);
@@ -1007,7 +1013,7 @@ function updateAutoUI() {
   const today = new Date().toISOString().slice(0, 10);
   const tradesToday = state.trades.filter(t => (t.source || '').startsWith('auto') && new Date(t.created_at).toISOString().slice(0, 10) === today).length;
   const modeLabel = s.autoMode === 'ai' ? 'Verity AI' : 'Rules only';
-  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Server cycle: <b>runs 24/7</b> — even with this page closed<br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
+  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Server cycle: <b>Runs 24/7</b> — even with this page closed<br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
   $('auto-status').innerHTML = statusHtml;
 }
 function renderAutoLog() {
@@ -1143,7 +1149,7 @@ $('btn-ask').onclick = askPredictor;
 // Predictor mode picker: Verity AI (2/day for standard members) vs
 // Rules only (unlimited). Switching to Rules only re-enables ASK even
 // when the AI limit is hit.
-const _setPredMode = m => { predMode = m; updatePredLimit(); };
+const _setPredMode = m => { predMode = m; updatePredLimit(); applyServerConfigBadges(); };
 const _pmAi = $('pred-mode-ai'); if (_pmAi) _pmAi.onclick = () => _setPredMode('ai');
 const _pmRu = $('pred-mode-rules'); if (_pmRu) _pmRu.onclick = () => _setPredMode('rules');
 $('btn-clear-pred').onclick = async () => { await api('/api/predictor', { method: 'DELETE' }); $('pred-history').innerHTML = ''; $('pred-answer').innerHTML = ''; await loadState(); };
@@ -1349,9 +1355,12 @@ function applyServerConfigBadges() {
     const el = $(id); if (el) el.classList.toggle('hidden', !smtpOff);
   }
   const rulesOnly = serverConfig.aiConfigured === false;
-  for (const id of ['auto-ai-badge', 'pred-ai-badge']) {
-    const el = $(id); if (el) el.classList.toggle('hidden', !rulesOnly);
-  }
+  const autoBadge = $('auto-ai-badge'); if (autoBadge) autoBadge.classList.toggle('hidden', !rulesOnly);
+  // Predictor badge is mode-aware: it only says "Rules-only mode" when the
+  // player actually has Rules only selected. In Verity AI mode the badge
+  // hides — but with no AI key the AI answer still falls back to rules
+  // under the hood, so the limit line above the ASK button says so.
+  const predBadge = $('pred-ai-badge'); if (predBadge) predBadge.classList.toggle('hidden', !(rulesOnly && predMode === 'rules'));
 }
 // Welcome board
 (function renderWelcomeBoard() {
