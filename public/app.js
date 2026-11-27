@@ -714,8 +714,20 @@ async function tryAuth(path, body) {
     }
     token = j.token; localStorage.setItem('verityinvest-token', token);
     if (path.includes('register') && j.needsVerification) {
-      if (j.codeSent) { $('verify-email-label').textContent = body.email; $('verify-block').classList.remove('hidden'); $('verify-msg').textContent = 'Code sent — enter it to verify your email, or skip for now.'; }
-      else { $('verify-block').classList.remove('hidden'); $('verify-msg').textContent = 'Email could not be verified automatically: ' + (j.codeError || 'SMTP not configured') + ' — you can verify later in Pings.'; }
+      if (j.codeSent) {
+        $('verify-email-label').textContent = body.email; $('verify-block').classList.remove('hidden');
+        $('verify-code').classList.remove('hidden'); $('btn-verify').classList.remove('hidden'); $('btn-resend').classList.remove('hidden');
+        $('btn-skip-verify').textContent = 'SKIP — VERIFY LATER IN PINGS';
+        $('verify-msg').textContent = 'Code sent — enter it to verify your email, or skip for now.';
+      } else {
+        // No code can ever arrive here (e.g. SMTP not set up on this server):
+        // do NOT trap the player on a verify panel with a VERIFY button that
+        // can never work. Save is already done server-side — just start playing.
+        $('verify-email-label').textContent = body.email; $('verify-block').classList.remove('hidden');
+        $('verify-code').classList.add('hidden'); $('btn-verify').classList.add('hidden'); $('btn-resend').classList.add('hidden');
+        $('btn-skip-verify').textContent = 'START PLAYING — VERIFY EMAIL LATER';
+        $('verify-msg').textContent = 'Your email was saved, but no code was sent: ' + (j.codeError || 'email is not set up on this server') + ' — verify it later in Pings once the owner adds email settings.';
+      }
       return; // stay on the verify panel until VERIFY & START PLAYING or SKIP
     }
     enterApp();
@@ -758,15 +770,18 @@ async function loadPlayers() {
   const el = $('welcome-board'); if (!el) return;
   el.innerHTML = CORE.map(s => `<div><b>${s}</b><span>${NAME_MAP[s]}</span></div>`).join('');
 })();
-// Boot
+// Boot — SECURITY: never auto-sign-in on load/reload. A stored token or
+// cookie must not open the owner account with no PIN. If a token is left
+// over from an earlier session, delete that server session, drop the
+// token, and always ask for name + PIN.
 (async () => {
   applyTheme(localStorage.getItem('verityinvest-theme') || 'terminal');
   renderThemePickers();
   if (!localStorage.getItem('verityinvest-welcomed')) showWelcome(); else $('welcome-screen').classList.add('hidden');
-  await loadPlayers();
   if (token) {
-    try { enterApp(); await refreshAll(); $('app-loading').classList.add('hidden'); return; }
-    catch { token = ''; localStorage.removeItem('verityinvest-token'); $('app-loading').classList.add('hidden'); $('app-error').classList.remove('hidden'); $('app').classList.remove('hidden'); return; }
+    try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}
+    token = ''; localStorage.removeItem('verityinvest-token');
   }
+  await loadPlayers();
   if (localStorage.getItem('verityinvest-welcomed')) showAuth('signin');
 })();

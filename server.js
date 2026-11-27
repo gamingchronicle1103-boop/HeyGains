@@ -345,7 +345,10 @@ function makeCode() { return String(Math.floor(100000 + Math.random() * 900000))
 async function sendVerificationCode(uid, email) {
   email = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'Enter a valid email address' };
-  if (!smtpConfigured()) return { ok: false, error: 'Email not configured on this server (SMTP not set up) — ask the owner to add SMTP credentials. No code was sent.', smtpConfigured: false };
+  // Save the address even when no code can be sent yet, so adding an email
+  // after creating an account does not silently lose it.
+  db.prepare('UPDATE users SET pending_email=? WHERE id=?').run(email, uid);
+  if (!smtpConfigured()) return { ok: false, error: 'Email not configured on this server (SMTP not set up) — ask the owner to add SMTP credentials. Your email was saved, no code was sent.', smtpConfigured: false };
   const hourAgo = Date.now() - 3600 * 1000;
   const recent = db.prepare('SELECT COUNT(*) c FROM email_verifications WHERE user_id=? AND created_at>?').get(uid, hourAgo).c;
   if (recent >= 3) return { ok: false, error: 'Too many codes sent — wait a bit and try again (max 3 per hour)' };
@@ -533,9 +536,10 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 function auth(req, res, next) {
+  // Security: Bearer token only. No cookie fallback — a cookie alone must
+  // never sign anyone in, or a reload would open the owner account with no PIN.
   const token = (req.headers.authorization || '').replace('Bearer ', '');
-  const cookie = (req.headers.cookie || '').split(';').map(c => c.trim()).find(c => c.startsWith('token='));
-  const t = token || (cookie ? cookie.slice(6) : null);
+  const t = token || null;
   if (!t) return res.status(401).json({ error: 'Not signed in' });
   const sess = db.prepare('SELECT * FROM sessions WHERE token=?').get(t);
   if (!sess) return res.status(401).json({ error: 'Session expired' });
@@ -597,7 +601,6 @@ app.post('/api/auth/register', async (req, res) => {
   if (!pinHash) return res.json({ token: null, needsClaim: true, user: { id, name: name.trim(), isOwner: !!isOwner, emailVerified: false }, needsVerification: false, codeSent: false, codeError: null, smtpConfigured: smtpConfigured() });
   const token = newToken();
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, id, Date.now());
-  res.setHeader('Set-Cookie', `token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
   let codeInfo = null;
   if ((email || '').trim()) { codeInfo = await sendVerificationCode(id, email); if (!codeInfo.ok) codeInfo = { ok: false, error: codeInfo.error, smtpConfigured: codeInfo.smtpConfigured }; }
   res.json({ token, user: { id, name: name.trim(), isOwner: !!isOwner, emailVerified: false }, needsVerification: !!(email || '').trim(), codeSent: !!codeInfo?.ok, codeError: codeInfo?.ok ? null : (codeInfo?.error || null), smtpConfigured: smtpConfigured() });
@@ -612,7 +615,6 @@ app.post('/api/auth/claim', (req, res) => {
   db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(hashPin(String(pin), salt), salt, user.id);
   const token = newToken();
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, user.id, Date.now());
-  res.setHeader('Set-Cookie', `token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
   res.json({ token, user: { id: user.id, name: user.name, isOwner: !!user.is_owner, emailVerified: false } });
 });
 app.post('/api/auth/login', (req, res) => {
@@ -623,12 +625,13 @@ app.post('/api/auth/login', (req, res) => {
   if (hashPin(String(pin || ''), user.salt) !== user.pin_hash) return res.status(401).json({ error: 'Wrong name or PIN' });
   const token = newToken();
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, user.id, Date.now());
-  res.setHeader('Set-Cookie', `token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
   res.json({ token, user: { id: user.id, name: user.name, isOwner: !!user.is_owner, email: user.email, emailVerified: !!user.email_verified, pendingEmail: user.pending_email } });
 });
 app.post('/api/auth/logout', auth, (req, res) => {
-  const cookie = (req.headers.cookie || '').split(';').map(c => c.trim()).find(c => c.startsWith('token='));
-  if (cookie) db.prepare('DELETE FROM sessions WHERE token=?').run(cookie.slice(6));
+  const t = (req.headers.authorization || '').replace('Bearer ', '');
+  if (t) db.prepare('DELETE FROM sessions WHERE token=?').run(t);
+  // Clear any old auth cookie left over from before the security fix.
+  res.setHeader('Set-Cookie', 'token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
   res.json({ ok: true });
 });
 
