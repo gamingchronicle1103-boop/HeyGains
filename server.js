@@ -293,6 +293,18 @@ async function fetchHistory(sym, range) {
     // so the line goes flat there instead of vanishing. This also makes
     // the index-based X axis true to time. NVDA is already full, so it
     // barely changes; DUOL's pre/post now show as real flat stretches.
+    // Also fill the start: some tickers have NO premarket trades at all
+    // (FANG: 0 premarket bars, TTWO 43, MCD 39) — without this the chart
+    // starts at 9:30 and the whole premarket area is blank. Carry the
+    // previous close forward from the 4:00 AM premarket open, so the line
+    // sits flat at yesterday's close until the first trade of the day.
+    const prevCloseFill = res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null;
+    const preStart = meta.currentTradingPeriod?.pre?.start ?? null;
+    if (prevCloseFill != null && preStart && pts[0].t > preStart * 1000) {
+      const head = [];
+      for (let t = preStart * 1000; t < pts[0].t; t += 60000) head.push({ t, o: prevCloseFill, h: prevCloseFill, l: prevCloseFill, c: prevCloseFill, v: 0 });
+      pts.unshift(...head);
+    }
     const filled = [pts[0]];
     for (let i = 1; i < pts.length; i++) {
       const prev = filled[filled.length - 1];
@@ -304,6 +316,14 @@ async function fetchHistory(sym, range) {
       filled.push(pts[i]);
     }
     pts.length = 0; pts.push(...filled);
+    // And the tail: some tickers stop trading early (FANG's last trade
+    // was 5:15 PM) — carry the last price flat to the 8:00 PM post-market
+    // close so the chart runs the full day instead of ending early.
+    const postEndFill = meta.currentTradingPeriod?.post?.end ?? null;
+    if (postEndFill && pts.length) {
+      const last = pts[pts.length - 1];
+      for (let t = last.t + 60000; t <= postEndFill * 1000; t += 60000) pts.push({ t, o: last.c, h: last.c, l: last.c, c: last.c, v: 0 });
+    }
   }
   const step = Math.max(1, Math.ceil(pts.length / 220));
   const candles = [];
