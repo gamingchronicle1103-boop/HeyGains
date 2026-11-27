@@ -5,8 +5,24 @@ services:
     plan: free
     buildCommand: npm install
     startCommand: node server.js
+    # Persistent disk for the SQLite database (data/hey-gains.db).
+    # NOTE: Render's FREE plan has NO persistent disks — a disk requires a
+    # paid instance (Starter, $7/mo). On free, this block is ignored / the
+    # deploy will fail if the plan can't attach it, so comment it out (and
+    # the DATA_DIR var below) if you stay on free — accounts and trades
+    # then live on Render's ephemeral filesystem and are LOST on every
+    # restart/redeploy. See README "Deploy — Render free data loss".
+    disk:
+      name: heygains-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: OWNER_NAME
         value: Lucas
       - key: NODE_ENV
         value: production
+      # Point the SQLite DB at the persistent disk above. Only set this
+      # when the disk is actually attached (paid plan); on free, leave it
+      # unset so the DB uses the local data/ folder instead.
+      - key: DATA_DIR
+        value: /data

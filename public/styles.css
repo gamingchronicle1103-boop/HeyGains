@@ -128,6 +128,8 @@ canvas{width:100%;height:320px;background:#06090a;border:1px solid var(--border)
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
 .legend i{display:inline-block;width:22px;height:8px;border-radius:3px;vertical-align:middle;margin-right:5px}
 .legend .lg-purple{background:rgba(179,136,255,.35)}
+.legend .lg-ma20{background:#b388ff}
+.legend .lg-vol{background:rgba(43,255,136,.4)}
 .legend .lg-grey{background:#7d8f83}
 .legend .lg-amber{background:var(--amber-soft)}
 .legend .lg-accent{background:var(--accent)}
@@ -236,3 +238,38 @@ footer{text-align:center;color:var(--muted);padding:22px;font-size:13px}
   #chart-price{font-size:22px}canvas{height:280px}
   #net-worth-big{font-size:34px}
 }
+
+/* ---------- Ticker tape ---------- */
+.ticker-tape{overflow:hidden;background:var(--card);border-bottom:1px solid var(--border);padding:7px 0;white-space:nowrap}
+.ticker-track{display:inline-flex;gap:0;align-items:center;white-space:nowrap;animation:ticker-scroll 45s linear infinite;will-change:transform}
+.ticker-tape:hover .ticker-track{animation-play-state:paused}
+@keyframes ticker-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.tape-item{padding:0 14px;font-size:13px}
+.tape-item b{font-size:13px}
+.tape-sep{color:var(--muted);padding:0 2px}
+/* ---------- Win confetti + stop-loss flash ---------- */
+.confetti-layer{position:fixed;inset:0;pointer-events:none;z-index:200;overflow:hidden}
+.confetti-layer i{position:absolute;top:-12px;width:9px;height:14px;border-radius:2px;animation:confetti-fall linear forwards}
+@keyframes confetti-fall{to{transform:translateY(105vh) rotate(720deg);opacity:.9}}
+@keyframes flash-loss-red{0%{box-shadow:0 0 0 3px rgba(255,71,87,.85)}100%{box-shadow:0 0 0 0 rgba(255,71,87,0)}}
+.flash-loss{animation:flash-loss-red 1.3s ease-out}
+.wl-controls input,.wl-controls select{margin-top:0}
+
+/* ---------- Leaderboard / achievements / portfolio history ---------- */
+.scoreboard-extra{max-width:1180px;margin:0 auto}
+.scoreboard-extra.card{margin:0 auto 16px;max-width:1180px}
+#portfolio-chart{height:220px}
+.lb-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto auto auto;gap:4px 10px;padding:9px 2px;border-bottom:1px solid var(--border);font-size:14px;align-items:center}
+.lb-row:last-child{border-bottom:0}
+.lb-rank{font-weight:700;color:var(--muted)}
+.lb-pct-main{font-weight:700;text-align:right;font-size:16px}
+.lb-worth{font-weight:700;text-align:right;color:var(--muted);font-size:13px}
+.lb-pct{font-weight:700;text-align:right;font-size:13px}
+@media(max-width:640px){.lb-row{grid-template-columns:28px minmax(0,1fr) auto}.lb-worth,.lb-today{display:none}}
+/* ---------- Stock chat ---------- */
+.chat-msg{padding:9px 2px;border-bottom:1px solid var(--border);font-size:14px;overflow-wrap:anywhere}
+.chat-msg:last-child{border-bottom:0}
+.rank-badge{display:inline-block;background:var(--accent);color:#06090a;font-weight:700;border-radius:999px;padding:3px 14px;font-size:15px}
+.badge-chip{display:inline-block;border:1px solid var(--border-2);border-radius:999px;padding:4px 11px;margin:3px;font-size:13px;font-weight:700}
+.badge-chip.earned{background:var(--green-bg);color:var(--green-soft);border-color:rgba(43,255,136,.35)}
+.badge-chip.locked{color:var(--muted);opacity:.65}

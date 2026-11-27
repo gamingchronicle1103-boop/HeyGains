@@ -14,7 +14,7 @@ behaviour, tab by tab:
 - **Exact wording everywhere:** "REAL PRICES. FAKE MONEY. ALL YOURS TO PLAY.",
   "WHO'S PLAYING?", "NET WORTH · PAPER", "WATCHLIST · LIVE",
   "TOP MOVERS · LIVE", "YOUR TRADES", "NEWS HIGHLIGHTS · BIGGEST MOVERS",
-  "AUTO TRADING · CLAUDE RUNS THE SIM", "STOCK PREDICTOR · AI",
+  "AUTO TRADING · VERITY AI RUNS THE SIM", "STOCK PREDICTOR · AI",
   "BUY/SELL PINGS", "EMAIL NOTIFICATIONS", "PING FEED", "STARTING CASH",
   "DISPLAY & PRICES", "PING RULES", "AUTO TRADER", "ABOUT & DANGER ZONE",
   "WHAT'S INSIDE", "HOW IT WORKS", "THE BOARD", "THE GAME". Tabs run
@@ -41,7 +41,7 @@ behaviour, tab by tab:
   and per-ping kind chips (BUY·DIP / BUY·MOMENTUM / SELL WATCH /
   SELL·STOP / SELL·TARGET).
 - **AUTO:** Credit Saver box, style picker, Auto-sell / Buy the dips /
-  Buy momentum toggles, CLAUDE AI vs RULES ONLY, steppers for budget
+  Buy momentum toggles, VERITY AI vs RULES ONLY, steppers for budget
   ($50–$50,000, ±$250), max positions (1–12), max trades/day (1–20) and
   check interval (30s/60s/2m/5m) — all clamped server-side too. The
   research pass covers up to 4 candidates (1 under Credit Saver) before
@@ -99,8 +99,9 @@ behaviour, tab by tab:
 - **Positions** flagged at the classic −5% stop / +10% take-profit lines,
   plus your AUTO style's lines. Trade log with realised P&L.
 - **Reset button** with confirmation — wipes cash back to your starting
-  amount, positions, history, chart cache, news, Predictor history, pings
-  and best run.
+  amount, positions, history, news, Predictor history, pings and best run.
+  (The shared live-price cache survives a reset — it is every player's
+  fallback when the feed is down, not part of one player's game.)
 - **Predictor tab:** ask a question about a ticker; returns
   Bullish / Bearish / Neutral / Mixed + confidence, key points, risks and a
   timeframe, from live price + recent closes + fresh news. History saved,
@@ -154,6 +155,35 @@ behaviour, tab by tab:
   be deleted (it runs the feedback inbox and player list) — for the owner
   the button shows disabled with that explanation.
 
+## Tier 3 features (Nov 27, 2026)
+
+- **Short selling:** SELL with no long position opens a short (negative
+  shares, avg short price). Proceeds are credited to cash; BUY against a
+  short covers it and books realised P&L (positive when the price fell).
+  Covering more than the short holds is rejected — cover first, then buy
+  long. The trade button reads SHORT / COVER accordingly, positions show a
+  SHORT tag with flipped stop/target lines, and the auto trader covers a
+  short at its style's lines instead of selling it.
+- **Limit / stop orders:** `orders` table + `POST /api/orders`,
+  `GET /api/orders`, `POST /api/orders/:id/cancel` (max 20 open per
+  player). Fills at the target price the moment the live price touches it
+  (limit buy ≤ target, stop buy ≥ target, limit sell ≥ target,
+  stop sell ≤ target), evaluated on every quote refresh and every server
+  cycle; a fill the account can't afford stays open and retries. Orders
+  are wiped by Reset and by Delete Account.
+- **Chart indicators:** volume bars (from the history `v` field, candles
+  carry summed volume) along the bottom of the main chart, an MA20 toggle
+  (off by default, purple line), and RSI(14) with an
+  overbought/oversold/neutral label in the chart caption.
+- **Predictor track record:** `GET /api/predictor/track-record` scores
+  every past Bullish/Bearish call against the actual move since it was
+  asked (correct / wrong / pending / unscored for Neutral/Mixed; accuracy
+  % over scored calls). Shown on the Predictor tab.
+- **PWA basics:** `public/manifest.json` (HeyGains, real 192/512 PNG
+  icons), `public/sw.js` (app-shell cache only — `/api/*` is never
+  cached), registered from `app.js` behind a `serviceWorker` guard so a
+  failed registration changes nothing.
+
 ## Run locally
 
 ```bash
@@ -165,20 +195,34 @@ node server.js
 ```
 
 Requires Node.js 22+ (uses built-in `node:sqlite`, no native build step).
-Data lives in `data/hey-gains.db` (SQLite). No other setup needed.
+Data lives in `data/hey-gains.db` (SQLite) — or in `$DATA_DIR/hey-gains.db`
+when `DATA_DIR` is set. No other setup needed. The server loads `.env`
+automatically (via `dotenv`) at startup, so `SMTP_*` / `AI_*` / `OWNER_NAME`
+in `.env` take effect without exporting them first.
 
 ### Claiming the owner account (Lucas)
 
 1. Open the app and click **Create account**.
-2. Create the **first** account, with the name `Lucas`. The first account
-   created is always the owner. (Or set `OWNER_NAME=Lucas` in `.env` — any
-   account registering with that name while no owner exists becomes owner.)
+2. Create an account with the name `Lucas`. **Only** an account whose name
+   matches `OWNER_NAME` (default `Lucas`, case-insensitive) is the owner —
+   the first account created is *not* the owner unless it is named Lucas.
+   A non-Lucas first account is just a regular player.
 3. Set your PIN — that's how you sign in. Only the owner account can turn
    Credit Saver off; every other account gets it forced back on by the server.
 
 ## Deploy
 
 ### Option A — Render (free, easiest for the 24/7 server)
+
+> **⚠️ Render free has NO persistent disk — data is lost on restart/redeploy.**
+> On the free plan the SQLite database lives on Render's ephemeral
+> filesystem, so every deploy, restart or sleep/wake **wipes all accounts,
+> positions, trades and settings**. To keep data, attach a paid persistent
+> disk (Starter instance, $7/mo): `render.yaml` already declares a 1 GB
+> disk mounted at `/data` with `DATA_DIR=/data` — uncomment/keep that block
+> only on a paid plan, and remove it (and the `DATA_DIR` var) on free.
+> There is no free way around this on Render; a VPS (Option C) keeps its
+> disk for free.
 
 1. Push this folder to a GitHub repo (do **not** commit `.env` or `data/`).
 2. In Render, New → Web Service → pick the repo. Build command:
@@ -218,7 +262,7 @@ Put it behind a reverse proxy (nginx/Caddy) with HTTPS for real users.
 | Var | Required? | What it does |
 |---|---|---|
 | `PORT` | no (default 3000) | Port to listen on |
-| `DATA_DIR` | no | Where the SQLite DB lives |
+| `DATA_DIR` | no | Where the SQLite DB lives (default `data/` next to `server.js`). Set to `/data` when a persistent disk is mounted there (Render paid plan) — see Deploy. On Render free there is no disk, so data in `data/` is lost on restart/redeploy. |
 | `OWNER_NAME` | no (default `Lucas`) | Owner account name |
 | `AI_API_URL`, `AI_API_KEY`, `AI_MODEL` | no | OpenAI-compatible chat endpoint for Predictor + AUTO AI mode. Azure OpenAI: `https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01` with your Azure key. Without these, AI mode falls back to rules and says so. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | no | SMTP for ping / auto-trade emails and email-verification codes. Without these, emails are queued + logged and the code/test buttons honestly report "SMTP not configured". |
