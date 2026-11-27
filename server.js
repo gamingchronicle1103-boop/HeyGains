@@ -29,6 +29,17 @@ const STYLES = {
 };
 const START_CASH = 100000;
 const OWNER_NAME = (process.env.OWNER_NAME || 'Lucas').toLowerCase();
+// Owner claim secret (H4): claiming — or registering with a PIN — the
+// owner-named account requires OWNER_CLAIM_CODE. If the server has no code
+// set, owner claims are refused outright (fail closed), so a fresh deploy
+// can never be taken over by the first "Lucas" registrant. Lucas sets his
+// own code as an env var; it is never committed anywhere.
+const OWNER_CLAIM_CODE = (process.env.OWNER_CLAIM_CODE || '').trim();
+function ownerClaimOk(code) {
+  if (!OWNER_CLAIM_CODE) return { ok: false, error: 'Owner claims are locked — the server owner must set OWNER_CLAIM_CODE first (see .env.example)' };
+  if (String(code || '').trim() !== OWNER_CLAIM_CODE) return { ok: false, error: 'Wrong owner claim code' };
+  return { ok: true };
+}
 // Discord invite link for the HeyGains community server.
 // Set DISCORD_INVITE_URL in the environment (or .env) to a real invite,
 // e.g. https://discord.gg/xxxxxx — until then it stays empty and the
@@ -63,6 +74,9 @@ CREATE TABLE IF NOT EXISTS email_verifications (id INTEGER PRIMARY KEY AUTOINCRE
 CREATE TABLE IF NOT EXISTS net_worth_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, net_worth REAL, created_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_nw_snapshots_user_time ON net_worth_snapshots(user_id, created_at);
 CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, symbol TEXT, side TEXT, type TEXT, target_price REAL, shares REAL, status TEXT DEFAULT 'open', created_at INTEGER, filled_at INTEGER, fill_price REAL);
+CREATE TABLE IF NOT EXISTS predictor_ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_pred_ai_usage_user_time ON predictor_ai_usage(user_id, created_at);
+CREATE TABLE IF NOT EXISTS pin_lockouts (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
 `);
 // Migrations for v11-era DBs (old file) (same file name was hey-gains.db; also handle new columns)
@@ -73,6 +87,7 @@ try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN timeframe TEXT DEFAULT ''`
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN key_points TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN risks TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN mode TEXT DEFAULT 'ai'`); } catch {}
+try { db.exec(`ALTER TABLE predictor_chats ADD COLUMN outlook_source TEXT DEFAULT 'rules'`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN symbol TEXT DEFAULT ''`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN shares REAL DEFAULT 0`); } catch {}
 try { db.exec(`ALTER TABLE auto_log ADD COLUMN price REAL DEFAULT 0`); } catch {}
@@ -83,6 +98,7 @@ try { db.exec(`ALTER TABLE email_queue ADD COLUMN attempts INTEGER DEFAULT 0`); 
 try { db.exec(`ALTER TABLE email_queue ADD COLUMN next_attempt_at INTEGER DEFAULT 0`); } catch {}
 // Existing players are auto-verified for the address they already had.
 try { db.prepare(`UPDATE users SET email_verified=1 WHERE email<>'' AND (email_verified IS NULL OR email_verified=0)`).run(); } catch {}
+try { db.prepare('UPDATE game SET best_worth=cash WHERE best_worth IS NULL OR best_worth=0').run(); } catch {}
 // If an old hey-gains.db exists, leave it alone; new DB is hey-gains.db.
 
 const DEFAULT_SETTINGS = () => ({
@@ -117,30 +133,59 @@ function effectiveSettings(uid, user) {
 }
 function getGame(uid) {
   let g = db.prepare('SELECT * FROM game WHERE user_id=?').get(uid);
-  if (!g) { const sc = getSettings(uid).startCash || START_CASH; db.prepare('INSERT INTO game(user_id,cash,best_run,created_at) VALUES(?,?,?,?)').run(uid, sc, 0, Date.now()); g = db.prepare('SELECT * FROM game WHERE user_id=?').get(uid); }
+  if (!g) { const sc = getSettings(uid).startCash || START_CASH; db.prepare('INSERT INTO game(user_id,cash,best_run,best_worth,created_at) VALUES(?,?,?,?,?)').run(uid, sc, 0, sc, Date.now()); g = db.prepare('SELECT * FROM game WHERE user_id=?').get(uid); }
   return g;
 }
-function hashPin(pin, salt) { return crypto.createHash('sha256').update(salt + ':' + pin).digest('hex'); }
+// One shared starting-cash validator (M6): register and /api/settings/
+// start-cash used to disagree (register floored, settings accepted
+// fractions like $100.50). Both now go through here.
+function validateStartCash(amount) {
+  const v = Math.floor(+amount);
+  if (!Number.isFinite(v) || v < 100 || v > 10000000) return { error: 'Starting cash must be $100–$10,000,000' };
+  return { value: v };
+}
+// PIN hashing (H5): scrypt (salted, memory-hard) for new PINs. Legacy rows
+// hashed with single-round SHA-256 still verify, and are upgraded to scrypt
+// on the next successful login. Comparisons are constant-time. A legacy
+// hash is 64 hex chars (SHA-256); a scrypt hash is 128 (64 bytes).
+function scryptHash(pin, salt) { return crypto.scryptSync(String(pin), salt, 64).toString('hex'); }
+function hashPin(pin, salt) { return scryptHash(pin, salt); } // new PINs: scrypt
+function verifyPin(pin, user) {
+  const stored = user.pin_hash || '';
+  const salt = user.salt || '';
+  try {
+    let hex;
+    if (stored.length === 64) hex = crypto.createHash('sha256').update(salt + ':' + String(pin)).digest('hex'); // legacy
+    else hex = scryptHash(pin, salt);
+    const a = Buffer.from(hex, 'hex'), b = Buffer.from(stored, 'hex');
+    if (a.length !== b.length) return null;
+    return crypto.timingSafeEqual(a, b) ? (stored.length === 64 ? 'legacy' : 'scrypt') : null;
+  } catch { return null; }
+}
+function upgradePinHash(uid, pin) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(scryptHash(pin, salt), salt, uid);
+}
 function newToken() { return crypto.randomBytes(32).toString('hex'); }
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // sessions expire after 30 days
-// PIN lockout: per-user failed-login tracking (in-memory). 5 wrong PINs lock
-// the account for 15 minutes; a successful login clears the counter.
+// PIN lockout: per-user failed-login tracking, persisted in SQLite so a
+// restart does not reset it. 5 wrong PINs lock the account for 15 minutes;
+// a successful login clears the counter.
 const PIN_LOCKOUT_MAX = 5, PIN_LOCKOUT_MS = 15 * 60 * 1000;
-const pinLockouts = new Map(); // userId -> { count, lockedUntil }
 function pinLockoutFor(uid) {
-  const e = pinLockouts.get(uid);
-  if (!e) return null;
-  if (e.lockedUntil && Date.now() >= e.lockedUntil) { pinLockouts.delete(uid); return null; }
-  return e;
+  const row = db.prepare('SELECT * FROM pin_lockouts WHERE user_id=?').get(uid);
+  if (!row) return null;
+  if (row.locked_until && Date.now() >= row.locked_until) { db.prepare('DELETE FROM pin_lockouts WHERE user_id=?').run(uid); return null; }
+  return { count: row.count, lockedUntil: row.locked_until || 0 };
 }
 function recordFailedPin(uid) {
-  const e = pinLockouts.get(uid) || { count: 0, lockedUntil: 0 };
-  e.count += 1;
-  if (e.count >= PIN_LOCKOUT_MAX) e.lockedUntil = Date.now() + PIN_LOCKOUT_MS;
-  pinLockouts.set(uid, e);
-  return e;
+  const cur = db.prepare('SELECT * FROM pin_lockouts WHERE user_id=?').get(uid);
+  const count = (cur?.count || 0) + 1;
+  const lockedUntil = count >= PIN_LOCKOUT_MAX ? Date.now() + PIN_LOCKOUT_MS : 0;
+  db.prepare('INSERT INTO pin_lockouts(user_id,count,locked_until) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET count=excluded.count, locked_until=excluded.locked_until').run(uid, count, lockedUntil);
+  return { count, lockedUntil };
 }
-function clearFailedPins(uid) { pinLockouts.delete(uid); }
+function clearFailedPins(uid) { db.prepare('DELETE FROM pin_lockouts WHERE user_id=?').run(uid); }
 function boardSymbols(uid) {
   const custom = db.prepare('SELECT * FROM custom_symbols WHERE user_id=? ORDER BY symbol').all(uid);
   return { core: [...TICKERS], custom, all: [...TICKERS, ...custom.map(c => c.symbol)] };
@@ -312,7 +357,7 @@ async function fetchLiveQuotesFresh(symbols = null) {
         const txt = await r.text();
         const row = txt.trim().split('\n')[1]?.split(',');
         const close = row ? parseFloat(row[6]) : NaN;
-        if (!isNaN(close)) { const prev = db.prepare('SELECT * FROM quote_cache WHERE symbol=?').get(sym); out[sym] = { symbol: sym, price: close, prevClose: prev?.prev_close ?? close, regularClose: prev?.regular_close ?? close, changePct: 0, extChangePct: 0, source: 'live-stooq', asOf: Date.now(), lastTrade: '', spark: prev?.spark ? JSON.parse(prev.spark) : [], name: NAMES[sym] || sym }; return; }
+        if (!isNaN(close)) { const prev = db.prepare('SELECT * FROM quote_cache WHERE symbol=?').get(sym); const pc = prev?.prev_close ?? close; out[sym] = { symbol: sym, price: close, prevClose: pc, regularClose: prev?.regular_close ?? close, changePct: pc ? ((close - pc) / pc) * 100 : 0, extChangePct: 0, source: 'stooq-close (yesterday)', asOf: Date.now(), lastTrade: '', spark: prev?.spark ? JSON.parse(prev.spark) : [], name: NAMES[sym] || sym }; return; }
         throw new Error('stooq parse');
       } catch (e2) {
         const prev = db.prepare('SELECT * FROM quote_cache WHERE symbol=?').get(sym);
@@ -320,6 +365,8 @@ async function fetchLiveQuotesFresh(symbols = null) {
       }
     }
   }));
+  const missingCore = TICKERS.filter(s => !out[s]);
+  if (!Object.keys(out).length || missingCore.length) throw new Error('live feed incomplete — missing: ' + (missingCore.join(',') || 'all'));
   const now = Date.now();
   for (const sym of Object.keys(out)) {
     const q = out[sym];
@@ -335,10 +382,43 @@ function cachedQuotes() {
   for (const r of rows) out[r.symbol] = { symbol: r.symbol, price: r.price, prevClose: r.prev_close, regularClose: r.regular_close, changePct: r.change_pct, extChangePct: r.ext_change_pct, source: r.source, asOf: r.as_of, lastTrade: r.last_trade_label || '', spark: r.spark ? JSON.parse(r.spark) : [], name: NAMES[r.symbol] || r.symbol };
   return out;
 }
+// History cache (H1, in-memory, 45 s): concurrent requests share one
+// in-flight Yahoo fetch; a Yahoo 429 retries with backoff; if the feed stays
+// down, the last good history is served as 'stale' instead of a 502.
+const HISTORY_CACHE_TTL_MS = 45 * 1000;
+const historyCache = new Map(); // key -> { data, at, promise }
+async function yahooChartRetry(sym, range, interval, attempts = 3) {
+  let delay = 1000;
+  for (let i = 0; i < attempts; i++) {
+    try { return await yahooChart(sym, range, interval); }
+    catch (e) {
+      const is429 = /429/.test(String(e.message || ''));
+      if (!is429 || i === attempts - 1) throw e;
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2;
+    }
+  }
+}
 async function fetchHistory(sym, range) {
+  const key = sym + '|' + range;
+  const now = Date.now();
+  const cached = historyCache.get(key);
+  if (cached?.data && now - cached.at < HISTORY_CACHE_TTL_MS) return cached.data;
+  if (cached?.promise) return cached.promise;
+  const p = fetchHistoryFresh(sym, range).then(data => { historyCache.set(key, { data, at: Date.now(), promise: null }); return data; })
+    .catch(e => {
+      const prev = historyCache.get(key);
+      historyCache.set(key, { data: prev?.data || null, at: prev?.at || 0, promise: null });
+      if (prev?.data) return { ...prev.data, source: 'stale', staleAsOf: prev.at };
+      throw e;
+    });
+  historyCache.set(key, { data: cached?.data || null, at: cached?.at || 0, promise: p });
+  return p;
+}
+async function fetchHistoryFresh(sym, range) {
   const map = { '1D': ['1d', '1m'], '5D': ['5d', '15m'], '1M': ['1mo', '1d'], '3M': ['3mo', '1d'], '6M': ['6mo', '1wk'], '1Y': ['1y', '1wk'], '5Y': ['5y', '1mo'] };
   const [r, iv] = map[range] || map['1D'];
-  const res = await yahooChart(sym, r, iv);
+  const res = await yahooChartRetry(sym, r, iv);
   const ts = res.timestamp || [];
   const q = res.indicators?.quote?.[0] || {};
   // After-hours bars: Yahoo reports volume 0 for ALL extended-hours bars,
@@ -346,40 +426,54 @@ async function fetchHistory(sym, range) {
   // real after-hours bar from a stale one (a previous fix did exactly that
   // and wiped every ticker's after-hours chart). Only drop bars past the
   // post-market end (20:00 ET), and dedupe repeated timestamps (Yahoo
-  // repeats the last bar). DUOL's after-hours stays sparse by nature —
-  // it barely trades after hours, so its few bars are far apart — but it
-  // is no longer singled out.
+  // repeats the last bar).
   const meta = res.meta || {};
   const postEnd = meta.currentTradingPeriod?.post?.end ?? null;
+  const regStartMs = (meta.currentTradingPeriod?.regular?.start ?? null) != null ? meta.currentTradingPeriod.regular.start * 1000 : null;
+  const regEndMs = (meta.currentTradingPeriod?.regular?.end ?? null) != null ? meta.currentTradingPeriod.regular.end * 1000 : null;
+  const stepMs = range === '1D' ? 60000 : range === '5D' ? 15 * 60 * 1000 : 0;
   const pts = [];
   const seenTs = new Set();
   for (let i = ts.length - 1; i >= 0; i--) {
     if (q.close?.[i] == null) continue;
     if (postEnd && ts[i] > postEnd) continue;
-    if (seenTs.has(ts[i])) continue;
-    seenTs.add(ts[i]);
-    pts.push({ t: ts[i] * 1000, o: q.open?.[i] ?? q.close[i], h: q.high?.[i] ?? q.close[i], l: q.low?.[i] ?? q.close[i], c: q.close[i], v: q.volume?.[i] ?? 0 });
+    // M11: snap the bar timestamp down to its grid boundary — Yahoo's last
+    // (partial) bar carries wall-clock seconds, which used to make tail
+    // points land at odd seconds and the point count vary between fetches.
+    const tMs = stepMs ? Math.floor(ts[i] * 1000 / stepMs) * stepMs : ts[i] * 1000;
+    if (seenTs.has(tMs)) continue;
+    seenTs.add(tMs);
+    const v = q.volume?.[i] ?? 0;
+    let o = q.open?.[i] ?? q.close[i], h = q.high?.[i] ?? q.close[i], l = q.low?.[i] ?? q.close[i];
+    // C2: a zero-volume bar OUTSIDE the regular session never traded — its
+    // open/high/low are quotes, not trades, and their wild wicks used to
+    // inflate the Y-scale and squeeze the real session. Flatten it to its
+    // close. (Regular-session zero-volume bars are left alone: a halted or
+    // untraded minute inside the session is real data.)
+    if ((range === '1D' || range === '5D') && v === 0 && regStartMs != null && regEndMs != null && (tMs < regStartMs || tMs >= regEndMs)) { o = h = l = q.close[i]; }
+    pts.push({ t: tMs, o, h, l, c: q.close[i], v });
   }
   pts.reverse();
+  // L9: drop single-bar spikes — a bar that jumps >25% from BOTH neighbours
+  // and then reverts is a bad Yahoo bar, not a trade. A real move stays
+  // (the next bar doesn't revert), so genuine +25% days survive.
+  for (let i = pts.length - 2; i >= 1; i--) {
+    const prev = pts[i - 1].c, cur = pts[i].c, next = pts[i + 1].c;
+    if (prev > 0 && next > 0 && Math.abs(cur - prev) / prev > 0.25 && Math.abs(cur - next) / next > 0.25) pts.splice(i, 1);
+  }
+  const prevCloseFill = res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null;
   if (range === '1D' && pts.length) {
-    // DUOL pre/post barely shows: Yahoo only returns 4 premarket bars and
-    // 5 post-market bars for DUOL (vs 330 / 241 for NVDA), so on an
-    // index-based chart those 9 bars get ~3% of the width instead of their
-    // true ~35% of the day. Fill the 1-minute grid by carrying the last
-    // traded price forward (v=0) — no trades means the price didn't move,
-    // so the line goes flat there instead of vanishing. This also makes
-    // the index-based X axis true to time. NVDA is already full, so it
-    // barely changes; DUOL's pre/post now show as real flat stretches.
-    // Also fill the start: some tickers have NO premarket trades at all
-    // (FANG: 0 premarket bars, TTWO 43, MCD 39) — without this the chart
-    // starts at 9:30 and the whole premarket area is blank. Carry the
-    // previous close forward from the 4:00 AM premarket open, so the line
-    // sits flat at yesterday's close until the first trade of the day.
-    const prevCloseFill = res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null;
+    // Fill the 1-minute grid by carrying the last traded price forward
+    // (v=0, f=1) — no trades means the price didn't move, so the line goes
+    // flat there instead of vanishing. This also makes the index-based X
+    // axis true to time. Also fill the start: some tickers have NO
+    // premarket trades at all — carry the previous close forward from the
+    // 4:00 AM premarket open, so the line sits flat at yesterday's close
+    // until the first trade of the day.
     const preStart = meta.currentTradingPeriod?.pre?.start ?? null;
     if (prevCloseFill != null && preStart && pts[0].t > preStart * 1000) {
       const head = [];
-      for (let t = preStart * 1000; t < pts[0].t; t += 60000) head.push({ t, o: prevCloseFill, h: prevCloseFill, l: prevCloseFill, c: prevCloseFill, v: 0 });
+      for (let t = preStart * 1000; t < pts[0].t; t += 60000) head.push({ t, o: prevCloseFill, h: prevCloseFill, l: prevCloseFill, c: prevCloseFill, v: 0, f: 1 });
       pts.unshift(...head);
     }
     const filled = [pts[0]];
@@ -388,52 +482,73 @@ async function fetchHistory(sym, range) {
       const gapMin = Math.round((pts[i].t - prev.t) / 60000);
       for (let m = 1; m < gapMin; m++) {
         const t = prev.t + m * 60000;
-        filled.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0 });
+        filled.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0, f: 1 });
       }
       filled.push(pts[i]);
     }
     pts.length = 0; pts.push(...filled);
-    // And the tail: some tickers stop trading early (FANG's last trade
-    // was 5:15 PM) — carry the last price flat to the 8:00 PM post-market
-    // close so the chart runs the full day instead of ending early.
+    // C1: the tail used to carry the last price flat to the 8:00 PM
+    // post-market close UNCONDITIONALLY — mid-morning that fabricated a
+    // flat line into the future for ~half the chart. Now it only fills up
+    // to right now (never a future timestamp); once the market is closed
+    // for the day the cap is the 8 PM close, as before.
     const postEndFill = meta.currentTradingPeriod?.post?.end ?? null;
     if (postEndFill && pts.length) {
       const last = pts[pts.length - 1];
-      for (let t = last.t + 60000; t <= postEndFill * 1000; t += 60000) pts.push({ t, o: last.c, h: last.c, l: last.c, c: last.c, v: 0 });
+      const capMs = Math.min(postEndFill * 1000, Math.floor(Date.now() / 60000) * 60000);
+      for (let t = last.t + 60000; t <= capMs; t += 60000) pts.push({ t, o: last.c, h: last.c, l: last.c, c: last.c, v: 0, f: 1 });
     }
   }
   if (range === '5D' && pts.length) {
-    // Same carry-forward fill as 1D, but on the 15-minute grid Yahoo
-    // returns for 5D: flat prev-close/prev-trade stretches for gaps between
-    // bars (thin after-hours, overnight), and a flat tail to the 8:00 PM ET
-    // post-market close of the last day, so the chart ends near 8pm ET
-    // instead of at the last trade (FANG often stops ~5:15 PM).
-    const stepMs = 15 * 60 * 1000;
+    // C3: the old 5D fill-forward bridged overnight/weekend gaps, turning
+    // a 57-hour weekend into a 229-bar flat line. Now gaps are filled ONLY
+    // inside one ET calendar day — overnight/weekend gaps stay gaps, so the
+    // line breaks there instead of faking a flat. Head-fill: start all
+    // tickers at the same 4:00 AM boundary of the first day (M10).
+    const step = 15 * 60 * 1000;
+    const sameDay = (a, b) => { const da = etDate(new Date(a)), db2 = etDate(new Date(b)); return da.year === db2.year && da.month === db2.month && da.day === db2.day; };
+    if (prevCloseFill != null) {
+      const { year, month, day } = etDate(new Date(pts[0].t));
+      const dayStart = etWallToMs(year, month, day, 4, 0);
+      if (pts[0].t > dayStart) {
+        const head = [];
+        for (let t = dayStart; t < pts[0].t; t += step) head.push({ t, o: prevCloseFill, h: prevCloseFill, l: prevCloseFill, c: prevCloseFill, v: 0, f: 1 });
+        pts.unshift(...head);
+      }
+    }
     const filled = [pts[0]];
     for (let i = 1; i < pts.length; i++) {
       const prev = filled[filled.length - 1];
-      const gap = Math.round((pts[i].t - prev.t) / stepMs);
+      if (!sameDay(prev.t, pts[i].t)) { filled.push(pts[i]); continue; } // overnight/weekend gap: break, don't fill
+      const gap = Math.round((pts[i].t - prev.t) / step);
       for (let m = 1; m < gap; m++) {
-        const t = prev.t + m * stepMs;
-        filled.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0 });
+        const t = prev.t + m * step;
+        filled.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0, f: 1 });
       }
       filled.push(pts[i]);
     }
     pts.length = 0; pts.push(...filled);
+    // Tail, capped at now like 1D (C1) — never into the future.
     const last = pts[pts.length - 1];
     const { year, month, day } = etDate(new Date(last.t));
     const endMs = etWallToMs(year, month, day, 20, 0);
-    for (let t = last.t + stepMs; t <= endMs; t += stepMs) pts.push({ t, o: last.c, h: last.c, l: last.c, c: last.c, v: 0 });
+    const capMs = Math.min(endMs, Math.floor(Date.now() / step) * step);
+    for (let t = last.t + step; t <= capMs; t += step) pts.push({ t, o: last.c, h: last.c, l: last.c, c: last.c, v: 0, f: 1 });
   }
   const step = Math.max(1, Math.ceil(pts.length / 220));
   const candles = [];
   for (let i = 0; i < pts.length; i += step) { const chunk = pts.slice(i, i + step); candles.push({ t: chunk[0].t, o: chunk[0].o, h: Math.max(...chunk.map(p => p.h)), l: Math.min(...chunk.map(p => p.l)), c: chunk[chunk.length - 1].c, v: chunk.reduce((a, p) => a + (p.v || 0), 0) }); }
-  return { symbol: sym, range, points: pts, candles, prevClose: res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null, source: 'live' };
+  // M7: prevClose is only meaningful for 1D (yesterday's close). For longer
+  // ranges Yahoo's chartPreviousClose is the first bar's close, not the
+  // day before the range — returning it mislabels the header math.
+  // regularStart/regularEnd let the frontend shade pre/after-hours from the
+  // real session instead of hardcoded 9:30/16:00 (H3).
+  return { symbol: sym, range, points: pts, candles, candleStep: step, prevClose: range === '1D' ? (res.meta?.chartPreviousClose ?? res.meta?.previousClose ?? null) : null, regularStart: regStartMs, regularEnd: regEndMs, source: 'live' };
 }
 async function fetchNews(symbols) {
   const out = [];
   try {
-    const q = encodeURIComponent(symbols.slice(0, 3).join(' OR ') + ' stock');
+    const q = encodeURIComponent(symbols.slice(0, 3).map(s => s.endsWith('-USD') ? s.replace('-USD', '') + ' crypto' : s + ' stock').join(' OR '));
     const r = await fetch(`https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`, { headers: UA, signal: AbortSignal.timeout(8000) });
     const txt = await r.text();
     const items = [...txt.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 12);
@@ -451,7 +566,7 @@ async function fetchNewsGrouped(symbols) {
   const groups = [];
   await Promise.all(symbols.map(async (sym) => {
     try {
-      const q = encodeURIComponent(sym + ' stock');
+      const q = encodeURIComponent(sym.endsWith('-USD') ? sym.replace('-USD', '') + ' crypto' : sym + ' stock');
       const r = await fetch(`https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`, { headers: UA, signal: AbortSignal.timeout(8000) });
       const txt = await r.text();
       const items = [...txt.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 3);
@@ -508,11 +623,14 @@ setInterval(() => { flushEmailQueue().catch(() => {}); }, 5 * 60 * 1000);
 function queueEmail(uid, subject, body) {
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
   if (!user?.email || !user.email_verified) return false;
+  // Without SMTP no email path works at all — don't queue rows that can
+  // never send and then claim "N emails queued" in the UI.
+  if (!smtpConfigured()) return false;
   db.prepare('INSERT INTO email_queue(user_id,subject,body,created_at) VALUES(?,?,?,?)').run(uid, subject, body, Date.now());
   return true;
 }
 // Email verification: 6-digit code, 10 min expiry, 5 tries, resend rate-limited.
-function makeCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
+function makeCode() { return String(crypto.randomInt(100000, 1000000)); } // CSPRNG, not Math.random
 async function sendVerificationCode(uid, email) {
   email = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: 'Enter a valid email address' };
@@ -637,8 +755,10 @@ function applyTrade(uid, symbol, side, shares, price, source) {
 }
 // Limit / stop orders: evaluated against live quotes on every quote
 // refresh (GET /api/quotes) and every server cycle. Fill price is the
-// TARGET price, not the live price — the order fills the moment the live
-// price touches the target.
+// TARGET price OR BETTER — a limit buy at $200 fills at the live $150, not
+// $200; a limit sell at $100 fills at the live $150, not $100. (C5: the old
+// code filled at the target even when the live price was better, so players
+// overpaid / undersold.)
 //   buy  + limit → fills when price <= target (buy the dip)
 //   buy  + stop  → fills when price >= target (buy the breakout)
 //   sell + limit → fills when price >= target (sell into strength)
@@ -655,13 +775,14 @@ function evaluateOrders(uid, quotes) {
   for (const o of open) {
     const q = quotes[o.symbol];
     if (!q || !orderTouched(o, q.price)) continue;
-    const r = applyTrade(uid, o.symbol, o.side, o.shares, o.target_price, 'order-' + o.type);
+    const fillPrice = o.side === 'buy' ? Math.min(o.target_price, q.price) : Math.max(o.target_price, q.price);
+    const r = applyTrade(uid, o.symbol, o.side, o.shares, fillPrice, 'order-' + o.type);
     if (r.error) continue; // stays open, retries next cycle
-    db.prepare("UPDATE orders SET status='filled', filled_at=?, fill_price=? WHERE id=?").run(Date.now(), o.target_price, o.id);
+    db.prepare("UPDATE orders SET status='filled', filled_at=?, fill_price=? WHERE id=?").run(Date.now(), fillPrice, o.id);
     anyFilled = true;
     const label = (o.type === 'limit' ? 'Limit' : 'Stop') + ' ' + o.side;
-    logAuto(uid, 'ORDER', `${label} filled: ${o.shares} ${o.symbol} @ $${o.target_price}${r.pnl ? ` · realised P&L $${r.pnl.toFixed(2)}` : ''}${r.shorted ? ' · short opened' : ''}${r.covered ? ' · short covered' : ''}`, { symbol: o.symbol, shares: o.shares, price: o.target_price });
-    if (getSettings(uid).emailTrades) queueEmail(uid, `${APP_NAME} ${label} order filled: ${o.symbol}`, `${label} order filled: ${o.shares} ${o.symbol} @ $${o.target_price}.`);
+    logAuto(uid, 'ORDER', `${label} filled: ${o.shares} ${o.symbol} @ $${fillPrice} (target $${o.target_price})${r.pnl ? ` · realised P&L $${r.pnl.toFixed(2)}` : ''}${r.shorted ? ' · short opened' : ''}${r.covered ? ' · short covered' : ''}`, { symbol: o.symbol, shares: o.shares, price: fillPrice });
+    if (getSettings(uid).emailTrades) queueEmail(uid, `${APP_NAME} ${label} order filled: ${o.symbol}`, `${label} order filled: ${o.shares} ${o.symbol} @ $${fillPrice} (target $${o.target_price}).`);
   }
   if (anyFilled) snapshotNetWorth(uid);
 }
@@ -689,34 +810,48 @@ function evaluatePings(uid, quotes) {
     if (s.sellPings !== false && !isShort && q.changePct <= -4) addAlert(uid, p.symbol, 'SELL WATCH', `${p.symbol} is down ${q.changePct.toFixed(2)}% today — watch it, ${heldLabel} — $${q.price}`, q.price);
     if (s.sellPings !== false && isShort && q.changePct >= 4) addAlert(uid, p.symbol, 'SHORT WATCH', `${p.symbol} is up ${q.changePct.toFixed(2)}% today — rising against your short, ${heldLabel} — $${q.price}`, q.price);
     if (s.stopTargetPings !== false) {
+      // One line only: the style's own stop/target. The old code also fired
+      // hardcoded -5%/+10% lines under the same SELL·STOP / SELL·TARGET
+      // kinds, so for Swing (-8%) the -5% line fired first and the style
+      // line never produced its own ping. (Day style IS -5%/+10%, so its
+      // players see no change.)
       if (chg <= style.stop) addAlert(uid, p.symbol, 'SELL·STOP', `${p.symbol} hit your ${style.label} stop ${style.stop}% (${chg.toFixed(2)}% vs your cost) — $${q.price}`, q.price);
       if (chg >= style.target) addAlert(uid, p.symbol, 'SELL·TARGET', `${p.symbol} hit your ${style.label} target +${style.target}% (${chg.toFixed(2)}% vs your cost) — $${q.price}`, q.price);
-      if (chg <= -5) addAlert(uid, p.symbol, 'SELL·STOP', `${p.symbol} down 5% vs your cost ($${p.avg_cost.toFixed(2)} → $${q.price}) — $${q.price}`, q.price);
-      if (chg >= 10) addAlert(uid, p.symbol, 'SELL·TARGET', `${p.symbol} up 10% vs your cost ($${p.avg_cost.toFixed(2)} → $${q.price}) — $${q.price}`, q.price);
     }
   }
 }
 async function researchPass(sym, quotes) {
   let trend = '';
+  let chg5 = 0, chg20 = 0;
   try {
     const h = await fetchHistory(sym, '1M');
     const closes = h.points.map(p => p.c);
-    if (closes.length >= 20) { const c5 = closes.slice(-5), c20 = closes.slice(-20); const avg = a => a.reduce((x, y) => x + y, 0) / a.length; const chg5 = ((closes[closes.length - 1] - c5[0]) / c5[0]) * 100; const chg20 = ((closes[closes.length - 1] - c20[0]) / c20[0]) * 100; trend = `Change over the last 5 days ${chg5 >= 0 ? '+' : ''}${chg5.toFixed(1)}% (5-day avg $${avg(c5).toFixed(2)}), change over the last 20 days ${chg20 >= 0 ? '+' : ''}${chg20.toFixed(1)}% (20-day avg $${avg(c20).toFixed(2)}), last $${closes[closes.length - 1].toFixed(2)}.`; }
+    if (closes.length >= 20) { const c5 = closes.slice(-5), c20 = closes.slice(-20); const avg = a => a.reduce((x, y) => x + y, 0) / a.length; chg5 = ((closes[closes.length - 1] - c5[0]) / c5[0]) * 100; chg20 = ((closes[closes.length - 1] - c20[0]) / c20[0]) * 100; trend = `Change over the last 5 days ${chg5 >= 0 ? '+' : ''}${chg5.toFixed(1)}% (5-day avg $${avg(c5).toFixed(2)}), change over the last 20 days ${chg20 >= 0 ? '+' : ''}${chg20.toFixed(1)}% (20-day avg $${avg(c20).toFixed(2)}), last $${closes[closes.length - 1].toFixed(2)}.`; }
   } catch { trend = 'Trend history unavailable.'; }
   const news = await fetchNews([sym]);
-  return { trend, headlines: news.slice(0, 3).map(n => n.title) };
+  const headlines = news.slice(0, 3).map(n => n.title);
+  // Real research score 0–100 (M15 — the old "strongest research score"
+  // was fiction, research was never scored): 5-day momentum counts double,
+  // 20-day momentum once, fresh headlines add a little. 50 is flat.
+  const score = Math.max(0, Math.min(100, Math.round(50 + chg5 * 2 + chg20 + Math.min(3, headlines.length) * 2)));
+  return { trend, headlines, score };
 }
 async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null } = {}) {
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
   if (!user) return { ran: false };
   const s = effectiveSettings(uid, user);
   const saver = !!s.creditSaver;
-  if (saver && !isMarketHours() && !manual) { logAuto(uid, 'CHECK', 'Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no AI runs while it is closed'); return { ran: true, action: 'waiting-market-hours' }; }
+  // Credit Saver blocks ALL auto trading outside market hours — including a
+  // manual "Run a Check Now". The old !manual exemption let a manual run
+  // trade after the early close while Saver was on, which is exactly what
+  // the Saver is supposed to prevent.
+  if (saver && !isMarketHours()) { logAuto(uid, 'CHECK', 'Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no auto runs while it is closed'); return { ran: true, action: 'waiting-market-hours' }; }
   const rawQuotes = presetQuotes || await fetchLiveQuotes(boardSymbols(uid).all);
   const quotes = effectiveQuotesFor(uid, rawQuotes);
   evaluatePings(uid, quotes);
   if (!s.autoOn && !manual) return { ran: true, action: 'auto-off' };
   const style = STYLES[s.style] || STYLES.day;
+  let soldCount = 0;
   if (s.autoSell !== false) for (const p of positionsOf(uid)) { // Exits cover everything held, incl. custom picks
     const q = quotes[p.symbol]; if (!q) continue;
     // Gain vs cost — flipped for shorts, so the same stop/target lines
@@ -734,9 +869,10 @@ async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null }
         logAuto(uid, 'SELL', `Sold ${p.shares} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}% vs cost, ${s.style} ${style.stop}%/${style.target}%)`, { symbol: p.symbol, shares: p.shares, price: q.price });
         if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-sell: ${p.symbol}`, `Sold ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
       }
-      return { ran: true, action: 'sold' };
+      soldCount += 1; // M16: keep going — exit EVERY position on its line this cycle, not just the first
     }
   }
+  if (soldCount) return { ran: true, action: 'sold', count: soldCount }; // no buy this cycle after exits
   const et = etDate(); // day cap counts in America/New_York, not UTC
   const [dayStart, dayEnd] = etDayBounds(et.year, et.month, et.day);
   const tradesToday = db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND source LIKE 'auto%' AND created_at>=? AND created_at<?").get(uid, dayStart, dayEnd).c;
@@ -755,11 +891,12 @@ async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null }
   const researched = [];
   for (const sig of candidates) {
     const res = await researchPass(sig.sym, quotes);
-    logAuto(uid, 'RESEARCH', `${sig.sym}: ${res.trend} Headlines: ${res.headlines.join(' | ') || 'none found'}${s.autoMode === 'rules' ? ' (rules mode — strongest research score)' : ''}`, { symbol: sig.sym });
-    researched.push({ ...sig, research: res });
+    logAuto(uid, 'RESEARCH', `${sig.sym}: research score ${res.score}/100 — ${res.trend} Headlines: ${res.headlines.join(' | ') || 'none found'}`, { symbol: sig.sym });
+    researched.push({ ...sig, research: res, score: res.score });
   }
+  researched.sort((a, b) => b.score - a.score); // strongest research score wins, not just the biggest % move
   const best = researched[0];
-  let decision = 'buy', reason = `${best.kind} signal ${best.chg.toFixed(1)}% (strongest research score)`;
+  let decision = 'buy', reason = `${best.kind} signal ${best.chg.toFixed(1)}% (research score ${best.score}/100)`;
   if (s.autoMode === 'ai') {
     const q = quotes[best.sym];
     const prompt = `Paper-trading decision. Ticker ${best.sym} (${NAMES[best.sym]}), live price $${q.price}, day change ${q.changePct.toFixed(2)}%, signal ${best.kind} ${best.chg.toFixed(1)}%, style ${style.label} (${style.stop}% stop / +${style.target}% target). Trend: ${best.research.trend} Headlines: ${best.research.headlines.join('; ') || 'none'}. Answer ONLY with BUY or PASS and one short reason.`;
@@ -769,34 +906,74 @@ async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null }
   }
   if (decision === 'pass') { logAuto(uid, 'PASS', `${best.sym} passed — ${reason}`, { symbol: best.sym }); return { ran: true, action: 'pass' }; }
   const q = quotes[best.sym];
-  const shares = Math.max(0.01, Math.floor((s.budgetPerBuy / q.price) * 100) / 100);
+  // C6: size to what the player can actually afford — the old code sized
+  // from budgetPerBuy alone, so every account with cash below the $10k
+  // default budget failed every check with "Not enough cash" forever.
+  const cash = getGame(uid).cash;
+  const budget = Math.min(s.budgetPerBuy, cash * 0.95);
+  const shares = Math.max(0.01, Math.floor((budget / q.price) * 100) / 100);
+  if (shares * q.price < 0.01) { logAuto(uid, 'CHECK', `Checked — no trade (not enough cash for even 0.01 shares of ${best.sym})`); return { ran: true, action: 'error' }; }
   const r = applyTrade(uid, best.sym, 'buy', shares, q.price, 'auto-' + s.style);
   if (r.error) { logAuto(uid, 'CHECK', `Checked — no trade (${r.error})`); return { ran: true, action: 'error' }; }
   logAuto(uid, 'BUY', `Bought ${shares} ${best.sym} @ $${q.price} — ${reason}`, { symbol: best.sym, shares, price: q.price });
   if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-buy: ${best.sym}`, `Bought ${shares} ${best.sym} @ $${q.price}. ${reason}`);
   return { ran: true, action: 'bought', symbol: best.sym };
 }
+// H7: the cycle ticks every 30 s (the fastest check step) and each player's
+// auto trader runs only when their own checkSeconds interval is due — the
+// old code hardcoded a 2-minute interval and never read checkSeconds at all.
+const lastCycleAt = new Map(); // userId -> ms of last auto cycle
 async function serverCycle() {
   try {
     const users = db.prepare('SELECT id FROM users').all();
     if (!users.length) return;
     const quotes = await fetchLiveQuotes(); // shared live quotes for the whole cycle
+    const now = Date.now();
     for (const u of users) {
       const s = effectiveSettings(u.id, db.prepare('SELECT * FROM users WHERE id=?').get(u.id));
-      if (s.autoOn) await runAutoCycle(u.id, { quotes });
-      else evaluatePings(u.id, effectiveQuotesFor(u.id, quotes));
+      const due = now - (lastCycleAt.get(u.id) || 0) >= (s.checkSeconds || 30) * 1000;
+      if (s.autoOn && due) { lastCycleAt.set(u.id, now); await runAutoCycle(u.id, { quotes }); }
+      evaluatePings(u.id, effectiveQuotesFor(u.id, quotes));
       evaluateOrders(u.id, effectiveQuotesFor(u.id, quotes)); // limit/stop orders fill on touch
-      snapshotNetWorth(u.id); // portfolio-over-time history, ~every 2 min
+      snapshotNetWorth(u.id); // portfolio-over-time history, ~every cycle
     }
     await flushEmailQueue().catch(() => {});
   } catch (e) { console.error('server cycle error', e.message); }
 }
-setInterval(serverCycle, 2 * 60 * 1000);
+setInterval(serverCycle, 30 * 1000);
 
 // ---------- Express ----------
 const app = express();
+app.disable('x-powered-by');
+// M5: security headers on every response (no helmet dependency — plain
+// Express headers). Sessions still live in localStorage on the client
+// (documented limitation: a stored-XSS would steal them — see README);
+// the headers below plus the escaped rendering are the mitigations.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  next();
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+// H6: global rate limiting (per IP, in-memory) on the brute-force surface:
+// register / login / claim / send-code. 30 attempts per 10 minutes per IP.
+const RATE_WINDOW_MS = 10 * 60 * 1000, RATE_MAX = 30;
+const rateBuckets = new Map();
+function rateLimit(req, res, next) {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const b = rateBuckets.get(ip) || { count: 0, resetAt: now + RATE_WINDOW_MS };
+  if (now > b.resetAt) { b.count = 0; b.resetAt = now + RATE_WINDOW_MS; }
+  b.count += 1;
+  rateBuckets.set(ip, b);
+  if (b.count > RATE_MAX) return res.status(429).json({ error: 'Too many attempts — wait a few minutes and try again' });
+  next();
+}
+// M5: sweep expired sessions hourly so dead tokens don't pile up in the DB.
+setInterval(() => { try { db.prepare('DELETE FROM sessions WHERE created_at<?').run(Date.now() - SESSION_TTL_MS); } catch {} }, 60 * 60 * 1000);
 function auth(req, res, next) {
   // Security: Bearer token only. No cookie fallback — a cookie alone must
   // never sign anyone in, or a reload would open the owner account with no PIN.
@@ -811,12 +988,22 @@ function auth(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'User not found' });
   next();
 }
-function publicState(uid) {
+function publicState(uid, opts = {}) {
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
   const game = getGame(uid);
   const s = effectiveSettings(uid, user);
-  const raw = cachedQuotes();
-  const quotes = effectiveQuotesFor(uid, raw);
+  // M1: prices used to come only from the quote_cache DB table, never live,
+  // and with no staleness flag. Prefer the fresh in-memory live cache when
+  // it is within the 10 s TTL; otherwise fall back to the DB cache and say
+  // so (quotesStale / quotesAsOf below). opts.quotesOverride forces one
+  // shared quote set (the leaderboard — M2); opts.rawQuotes skips the
+  // per-player overnight freeze so every player is ranked on the same prices.
+  const liveFresh = liveQuoteCache.data && Date.now() - liveQuoteCache.at < QUOTE_CACHE_TTL_MS;
+  const raw = opts.quotesOverride || (liveFresh ? liveQuoteCache.data : cachedQuotes());
+  const quotes = opts.rawQuotes ? raw : effectiveQuotesFor(uid, raw);
+  const asOfs = Object.values(raw).map(q => q.asOf || 0).filter(Boolean);
+  const quotesAsOf = asOfs.length ? Math.max(...asOfs) : 0;
+  const quotesStale = !quotesAsOf || Date.now() - quotesAsOf > 60 * 1000;
   const positions = positionsOf(uid).map(p => {
     const q = quotes[p.symbol]; const price = q?.price ?? p.avg_cost;
     const isShort = p.shares < 0;
@@ -857,11 +1044,13 @@ function publicState(uid) {
   const todayChange = openTodayChange + todayAdjust;
   const todayPct = (netWorth - todayChange) ? (todayChange / (netWorth - todayChange)) * 100 : 0;
   let bestWorth = game.best_worth || 0;
-  if (netWorth > bestWorth) { bestWorth = netWorth; db.prepare('UPDATE game SET best_worth=? WHERE user_id=?').run(bestWorth, uid); }
+  // L1: a read endpoint must not write. best_worth only updates when the
+  // caller says so (trade / order / snapshot paths pass updateBest: true).
+  if (opts.updateBest && netWorth > bestWorth) { bestWorth = netWorth; db.prepare('UPDATE game SET best_worth=? WHERE user_id=?').run(bestWorth, uid); }
   const emailQueued = db.prepare("SELECT COUNT(*) c FROM email_queue WHERE user_id=? AND status='queued'").get(uid).c;
   return {
     user: { id: user.id, name: user.name, email: user.email || '', pendingEmail: user.pending_email || '', emailVerified: !!user.email_verified, isOwner: !!user.is_owner },
-    cash: game.cash, bestRun: game.best_run, bestWorth, netWorth, allTime, allTimePct, todayChange, todayPct, emailQueued,
+    cash: game.cash, bestRun: game.best_run, bestWorth, netWorth, allTime, allTimePct, todayChange, todayPct, emailQueued, quotesAsOf, quotesStale,
     positions, customSymbols: boardSymbols(uid).custom, coreTickers: TICKERS,
     trades: db.prepare('SELECT * FROM trades WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     orders: listOrders(uid),
@@ -875,21 +1064,29 @@ function publicState(uid) {
   };
 }
 function snapshotNetWorth(uid) {
+  // (best_worth updates here — this is a write path, not a read.)
   // At most one snapshot per user per 90 s — the server cycle runs every
   // 2 min, and trades also snapshot, so this keeps the history ~2-min
   // spaced without spamming a row on every trade.
   const last = db.prepare('SELECT created_at FROM net_worth_snapshots WHERE user_id=? ORDER BY created_at DESC LIMIT 1').get(uid);
   if (last && Date.now() - last.created_at < 90 * 1000) return;
-  const nw = publicState(uid).netWorth;
+  const nw = publicState(uid, { updateBest: true }).netWorth;
   db.prepare('INSERT INTO net_worth_snapshots(user_id,net_worth,created_at) VALUES(?,?,?)').run(uid, nw, Date.now());
 }
 // Leaderboard rows: public numbers only — name, owner flag, net worth,
 // cash, today + all-time change. Never PINs, tokens, emails or salts.
 function leaderboardRows() {
   const users = db.prepare('SELECT id, name, is_owner FROM users ORDER BY created_at').all();
+  // M2: every player is ranked on the SAME quote set. The old code called
+  // publicState() per player, and the per-player overnight freeze meant one
+  // player could be ranked on the 4 PM close while another got the live
+  // extended price. L20: round the numbers — float noise used to rank a
+  // player #1 with +0.00000009%.
+  const shared = cachedQuotes();
+  const r2 = v => Math.round((v || 0) * 100) / 100;
   const rows = users.map(u => {
-    const s = publicState(u.id);
-    return { name: u.name, isOwner: !!u.is_owner, netWorth: s.netWorth, cash: s.cash, todayChange: s.todayChange, todayPct: s.todayPct, allTime: s.allTime, allTimePct: s.allTimePct };
+    const s = publicState(u.id, { quotesOverride: shared, rawQuotes: true });
+    return { name: u.name, isOwner: !!u.is_owner, netWorth: r2(s.netWorth), cash: r2(s.cash), todayChange: r2(s.todayChange), todayPct: r2(s.todayPct), allTime: r2(s.allTime), allTimePct: r2(s.allTimePct) };
   });
   // Ranked by % return (allTimePct), NOT by dollars: a player who turned
   // $1,000 into $1,050 (+5%) beats one who turned $100,000 into $100,500
@@ -912,9 +1109,15 @@ function rankFor(allTimePct) {
 function computeAchievements(uid) {
   const s = publicState(uid);
   const trades = db.prepare('SELECT * FROM trades WHERE user_id=? ORDER BY created_at').all(uid);
-  const sells = trades.filter(t => t.side === 'sell');
-  // Single-trade gain % for a sell: pnl / cost basis (proceeds - pnl).
-  const gainPct = t => { const basis = (t.total || 0) - (t.pnl || 0); return basis > 0 ? (t.pnl / basis) * 100 : 0; };
+  // M3: winning exits include short COVERS (a buy with source '-cover'),
+  // not just sells — a +20% short win used to earn neither +10% Winner
+  // nor Stop Honoured. Cover basis is the short value (total + pnl).
+  const sells = trades.filter(t => t.side === 'sell' || (t.side === 'buy' && String(t.source || '').endsWith('-cover')));
+  const gainPct = t => {
+    const isCover = t.side === 'buy' && String(t.source || '').endsWith('-cover');
+    const basis = isCover ? (t.total || 0) + (t.pnl || 0) : (t.total || 0) - (t.pnl || 0);
+    return basis > 0 ? (t.pnl / basis) * 100 : 0;
+  };
   const firstBigWin = sells.find(t => gainPct(t) >= 10);
   // Stop honoured: sold at a loss no worse than ~-6% vs cost (the -5%
   // stop, plus a point of fill slippage) instead of riding it further down.
@@ -959,21 +1162,34 @@ app.get('/api/health', (req, res) => res.json({ ok: true, app: APP_NAME, session
 // sign-in). Only exposes the Discord invite URL (empty until configured)
 // plus two booleans the UI uses for its banners/badges.
 app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured() }));
-app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = '' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at").all() }));
+// H6: the sign-in page needs the player list before auth, so this stays
+// public — but it no longer leaks which account is the owner (that flag
+// used to let anyone target the owner account for PIN attacks). has_pin
+// stays: the sign-in UI needs it to tell "sign in" from "claim".
+app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id, name, CASE WHEN pin_hash IS NULL OR pin_hash = '' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at").all() }));
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', rateLimit, async (req, res) => {
   const { name, pin, email, startCash } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Enter your name' });
-  if (pin && String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 characters' });
+  if (String(name).trim().length > 30) return res.status(400).json({ error: 'Name is too long (max 30 characters)' }); // L5
+  if (pin && String(pin).length < 6) return res.status(400).json({ error: 'PIN must be at least 6 characters' }); // H5
   // Starting cash is chosen at sign-up ($100–$10,000,000, default $100,000).
   // Validate server-side — a bad value is rejected, never silently clamped.
-  const sc = (startCash == null || startCash === '') ? START_CASH : Math.floor(+startCash);
-  if (!Number.isFinite(sc) || sc < 100 || sc > 10000000) return res.status(400).json({ error: 'Starting cash must be $100–$10,000,000' });
-  if (db.prepare('SELECT 1 FROM users WHERE name=?').get(name.trim())) return res.status(400).json({ error: 'That name is taken' });
+  const scR = (startCash == null || startCash === '') ? { value: START_CASH } : validateStartCash(startCash);
+  if (scR.error) return res.status(400).json({ error: scR.error });
+  const sc = scR.value;
+  if (db.prepare('SELECT 1 FROM users WHERE name=?').get(name.trim())) return res.status(400).json({ error: 'Could not create an account with that name — try another name' }); // H6: generic, no name-squatting oracle
   // Owner is ONLY an exact name match with OWNER_NAME (default Lucas,
   // case-insensitive). The first registrant is never owner just for being
   // first — a non-Lucas first account stays a regular player.
   const isOwner = name.trim().toLowerCase() === OWNER_NAME ? 1 : 0;
+  // H4: registering the owner name WITH a PIN proves ownership — it needs
+  // the owner claim code. (Registering it PIN-less is still allowed; the
+  // claim step below enforces the code then.)
+  if (isOwner && pin) {
+    const chk = ownerClaimOk(req.body?.claimCode);
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+  }
   const salt = crypto.randomBytes(16).toString('hex');
   const pinHash = pin ? hashPin(String(pin), salt) : null; // no PIN yet — claim it later with SET PIN & CLAIM IT
   const id = db.prepare('INSERT INTO users(name,pin_hash,salt,email,is_owner,created_at) VALUES(?,?,?,?,?,?)').run(name.trim(), pinHash, salt, '', isOwner, Date.now()).lastInsertRowid;
@@ -985,40 +1201,51 @@ app.post('/api/auth/register', async (req, res) => {
   // The player must tap their name on the sign-in page and choose SET PIN & CLAIM IT.
   if (!pinHash) return res.json({ token: null, needsClaim: true, user: { id, name: name.trim(), isOwner: !!isOwner, emailVerified: false }, needsVerification: false, codeSent: false, codeError: null, smtpConfigured: smtpConfigured() });
   const token = newToken();
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(id); // M5: rotate — a new sign-in revokes older tokens
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, id, Date.now());
   let codeInfo = null;
   if ((email || '').trim()) { codeInfo = await sendVerificationCode(id, email); if (!codeInfo.ok) codeInfo = { ok: false, error: codeInfo.error, smtpConfigured: codeInfo.smtpConfigured }; }
   res.json({ token, user: { id, name: name.trim(), isOwner: !!isOwner, emailVerified: false }, needsVerification: !!(email || '').trim(), codeSent: !!codeInfo?.ok, codeError: codeInfo?.ok ? null : (codeInfo?.error || null), smtpConfigured: smtpConfigured() });
 });
-app.post('/api/auth/claim', (req, res) => {
+app.post('/api/auth/claim', rateLimit, (req, res) => {
   const { name, pin } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE name=?').get((name || '').trim());
   if (!user) return res.status(404).json({ error: 'No player with that name' });
   if (user.pin_hash) return res.status(400).json({ error: 'That player already has a PIN — sign in instead' });
-  if (!pin || String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 characters' });
+  if (!pin || String(pin).length < 6) return res.status(400).json({ error: 'PIN must be at least 6 characters' }); // H5
+  // H4: claiming the OWNER account proves ownership — it needs the claim code.
+  if (user.is_owner) {
+    const chk = ownerClaimOk(req.body?.claimCode);
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+  }
   const salt = crypto.randomBytes(16).toString('hex');
   db.prepare('UPDATE users SET pin_hash=?, salt=? WHERE id=?').run(hashPin(String(pin), salt), salt, user.id);
   const token = newToken();
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(user.id); // M5: rotate
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, user.id, Date.now());
   res.json({ token, user: { id: user.id, name: user.name, isOwner: !!user.is_owner, emailVerified: false } });
 });
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', rateLimit, (req, res) => {
   const { name, pin } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE name=?').get((name || '').trim());
-  if (!user) return res.status(401).json({ error: 'Wrong name or PIN' });
-  if (!user.pin_hash) return res.status(401).json({ error: 'That player has no PIN yet — tap it and choose SET PIN & CLAIM IT' });
+  // H6: one generic error for every failure — the old "no PIN yet" message
+  // told an attacker which accounts exist without a PIN.
+  if (!user || !user.pin_hash) return res.status(401).json({ error: 'Wrong name or PIN' });
   const lock = pinLockoutFor(user.id);
   if (lock?.lockedUntil) {
     const mins = Math.ceil((lock.lockedUntil - Date.now()) / 60000);
     return res.status(429).json({ error: `Too many wrong PINs — this account is locked for ${mins} more minute${mins === 1 ? '' : 's'}` });
   }
-  if (hashPin(String(pin || ''), user.salt) !== user.pin_hash) {
+  const verified = verifyPin(String(pin || ''), user); // H5: scrypt + constant-time, legacy SHA-256 still accepted
+  if (!verified) {
     const e = recordFailedPin(user.id);
     if (e.lockedUntil) return res.status(429).json({ error: 'Too many wrong PINs — this account is locked for 15 minutes' });
     return res.status(401).json({ error: 'Wrong name or PIN' });
   }
+  if (verified === 'legacy') upgradePinHash(user.id, String(pin || '')); // silently upgrade old hashes to scrypt
   clearFailedPins(user.id);
   const token = newToken();
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(user.id); // M5: rotate — a new sign-in revokes older tokens
   db.prepare('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)').run(token, user.id, Date.now());
   res.json({ token, user: { id: user.id, name: user.name, isOwner: !!user.is_owner, email: user.email, emailVerified: !!user.email_verified, pendingEmail: user.pending_email } });
 });
@@ -1032,7 +1259,7 @@ app.post('/api/auth/logout', auth, (req, res) => {
 });
 
 // Email verification
-app.post('/api/email/send-code', auth, async (req, res) => {
+app.post('/api/email/send-code', auth, rateLimit, async (req, res) => {
   const r = await sendVerificationCode(req.user.id, req.body?.email || req.user.pending_email || req.user.email);
   if (!r.ok) return res.status(400).json(r);
   res.json(r);
@@ -1048,10 +1275,12 @@ app.get('/api/quotes', auth, async (req, res) => {
   try {
     const q = await fetchLiveQuotes(boardSymbols(req.user.id).all);
     const eff = effectiveQuotesFor(req.user.id, q);
+    evaluatePings(req.user.id, eff); // H8: pings really are evaluated every ~10 s now, as the UI claims
     evaluateOrders(req.user.id, eff); // open limit/stop orders fill on touch
-    res.json({ quotes: eff, session: marketSession(), updatedAt: Date.now() });
+    const stale = Object.values(q).some(v => !v.asOf || Date.now() - v.asOf > 60 * 1000) || Object.values(q).some(v => String(v.source || '').includes('simulated'));
+    res.json({ quotes: eff, session: marketSession(), updatedAt: Date.now(), stale });
   }
-  catch { res.json({ quotes: effectiveQuotesFor(req.user.id, cachedQuotes()), session: marketSession(), updatedAt: Date.now(), note: 'live feed failed, showing last cached prices' }); }
+  catch { res.json({ quotes: effectiveQuotesFor(req.user.id, cachedQuotes()), session: marketSession(), updatedAt: Date.now(), stale: true, note: 'live feed failed, showing last cached prices' }); }
 });
 app.get('/api/history', auth, async (req, res) => {
   const { symbol, range } = req.query;
@@ -1061,7 +1290,7 @@ app.get('/api/history', auth, async (req, res) => {
   if (!VALID_RANGES.includes(r)) return res.status(400).json({ error: 'Unknown range — use 1D, 5D, 1M, 3M, 6M, 1Y or 5Y' });
   try { res.json(await fetchHistory(symbol, r)); } catch (e) { res.status(502).json({ error: 'History feed failed: ' + e.message }); }
 });
-app.get('/api/news', async (req, res) => {
+app.get('/api/news', auth, async (req, res) => {
   try {
     const quotes = cachedQuotes();
     const moverRows = Object.values(quotes).sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct)).slice(0, 6);
@@ -1153,7 +1382,7 @@ app.post('/api/trade', auth, async (req, res) => {
   const r = applyTrade(req.user.id, symbol, side, +shares, price, 'manual');
   if (r.error) return res.status(400).json({ error: r.error });
   snapshotNetWorth(req.user.id); // throttled to 90 s, so cheap
-  res.json({ ok: true, price, shorted: !!r.shorted, covered: !!r.covered, pnl: r.pnl || 0, session: marketSession(), state: publicState(req.user.id) });
+  res.json({ ok: true, price, shorted: !!r.shorted, covered: !!r.covered, pnl: r.pnl || 0, session: marketSession(), state: publicState(req.user.id, { updateBest: true }) });
 });
 // Limit / stop orders — place, list, cancel. A new order fills immediately
 // if the live price already touches its target.
@@ -1175,7 +1404,7 @@ app.post('/api/orders', auth, async (req, res) => {
     evaluateOrders(req.user.id, quotes);
     filledNow = db.prepare('SELECT status FROM orders WHERE id=?').get(id).status === 'filled';
   } catch {}
-  res.json({ ok: true, id, filledNow, orders: listOrders(req.user.id), state: publicState(req.user.id) });
+  res.json({ ok: true, id, filledNow, orders: listOrders(req.user.id), state: publicState(req.user.id, { updateBest: true }) });
 });
 app.get('/api/orders', auth, (req, res) => res.json({ orders: listOrders(req.user.id) }));
 app.post('/api/orders/:id/cancel', auth, (req, res) => {
@@ -1194,18 +1423,19 @@ app.post('/api/reset', auth, (req, res) => {
   res.json({ ok: true, state: publicState(req.user.id) });
 });
 app.post('/api/settings/start-cash', auth, (req, res) => {
-  const amount = +req.body?.amount;
-  if (!Number.isFinite(amount) || amount < 100 || amount > 10000000) return res.status(400).json({ error: 'Starting cash must be $100–$10,000,000' });
+  const chk = validateStartCash(req.body?.amount); // M6: same validator as register (floors fractions)
+  if (chk.error) return res.status(400).json({ error: chk.error });
+  const amount = chk.value;
   const s = getSettings(req.user.id); s.startCash = amount; saveSettings(req.user.id, s);
   wipeGame(req.user.id, amount); // restarts fresh; board, settings, email and theme survive
-  res.json({ ok: true, startCash: amount, state: publicState(req.user.id) });
+  res.json({ ok: true, startCash: amount, state: publicState(req.user.id, { updateBest: true }) });
 });
 app.post('/api/account/delete', auth, (req, res) => {
   const { pin } = req.body || {};
   if (req.user.is_owner) return res.status(403).json({ error: 'The owner account cannot be deleted — it runs the feedback inbox and player list for everyone else.' });
-  if (!req.user || hashPin(String(pin || ''), req.user.salt) !== req.user.pin_hash) return res.status(401).json({ error: 'Wrong PIN — account not deleted.' });
+  if (!req.user || !verifyPin(String(pin || ''), req.user)) return res.status(401).json({ error: 'Wrong PIN — account not deleted.' });
   const uid = req.user.id;
-  for (const t of ['positions', 'trades', 'predictor_chats', 'alerts', 'auto_log', 'email_queue', 'settings', 'custom_symbols', 'email_verifications', 'net_worth_snapshots', 'orders', 'chat_messages', 'game', 'sessions']) db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
+  for (const t of ['positions', 'trades', 'predictor_chats', 'predictor_ai_usage', 'alerts', 'auto_log', 'email_queue', 'settings', 'custom_symbols', 'email_verifications', 'net_worth_snapshots', 'orders', 'chat_messages', 'game', 'sessions', 'pin_lockouts']) db.prepare(`DELETE FROM ${t} WHERE user_id=?`).run(uid);
   db.prepare('DELETE FROM feedback WHERE user_id=?').run(uid);
   db.prepare('DELETE FROM users WHERE id=?').run(uid);
   res.json({ ok: true });
@@ -1213,15 +1443,24 @@ app.post('/api/account/delete', auth, (req, res) => {
 
 // Predictor daily limit — AI mode ONLY. Standard members get 2 Verity AI
 // questions per ET calendar day; rules-only questions are unlimited and
-// never counted, and the owner is unlimited in both modes. Counts AI-mode
-// asks recorded in predictor_chats for the current ET day (legacy rows
-// predate the mode column and default to 'ai', since every ask then was
-// an AI attempt).
+// never counted, and the owner is unlimited in both modes.
+//
+// C4: the count lives in a SEPARATE append-only ledger (predictor_ai_usage)
+// that NOTHING deletes — not Clear history, not a game reset. The old code
+// counted rows in predictor_chats, so DELETE /api/predictor (the UI's
+// "Clear history" button) reset the day's count back to 0 and gave
+// unlimited AI asks.
 const PREDICTOR_AI_DAILY_LIMIT = 2;
 function predictorAiUsedToday(uid) {
   const d = etDate();
   const [start, end] = etDayBounds(d.year, d.month, d.day);
-  return db.prepare(`SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND (mode IS NULL OR mode='ai') AND created_at>=? AND created_at<?`).get(uid, start, end).c;
+  // Legacy rows (before the ledger existed) counted from predictor_chats so
+  // old asks still count toward today's limit; the ledger is authoritative
+  // for everything since. Take the max, never the sum (a legacy ask is also
+  // in the ledger once it was recorded there).
+  const legacy = db.prepare(`SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND (mode IS NULL OR mode='ai') AND created_at>=? AND created_at<? AND NOT EXISTS (SELECT 1 FROM predictor_ai_usage WHERE user_id=? AND ABS(created_at - predictor_chats.created_at) < 2000)`).get(uid, start, end, uid).c;
+  const ledger = db.prepare('SELECT COUNT(*) c FROM predictor_ai_usage WHERE user_id=? AND created_at>=? AND created_at<?').get(uid, start, end).c;
+  return legacy + ledger;
 }
 function predictorLimitInfo(uid, user) {
   if (user?.is_owner) return { predictorLimit: PREDICTOR_AI_DAILY_LIMIT, predictorUsed: predictorAiUsedToday(uid), predictorRemaining: null, predictorUnlimited: true };
@@ -1250,7 +1489,18 @@ app.post('/api/predictor', auth, async (req, res) => {
   else if (chg >= 1) { outlook = 'Bullish'; confidence = 45; } else if (chg <= -1) { outlook = 'Bearish'; confidence = 45; }
   // AI runs only in AI mode. Rules mode skips the AI call entirely —
   // the answer below is built from live price, trend and news.
-  const ai = mode === 'ai' ? await aiDecide(`You are a paper-trading analyst. Ticker ${symbol}, live price $${q?.price}, day change ${chg.toFixed(2)}%. Trend: ${res2.trend} Headlines: ${res2.headlines.join('; ') || 'none'}. Question: ${question}. Give outlook (Bullish/Bearish/Neutral/Mixed), confidence 0-100, 3 key points, 2 risks, timeframe. Keep it short.`) : null;
+  const ai = mode === 'ai' ? await aiDecide(`You are a paper-trading analyst. Ticker ${symbol}, live price $${q?.price}, day change ${chg.toFixed(2)}%. Trend: ${res2.trend} Headlines: ${res2.headlines.join('; ') || 'none'}. Question: ${question}. Give outlook (Bullish/Bearish/Neutral/Mixed), confidence 0-100, 3 key points, 2 risks, timeframe. Keep it short. Start your reply with two lines: OUTLOOK: <Bullish|Bearish|Neutral|Mixed> and CONFIDENCE: <0-100>.`) : null;
+  // C8: the outlook/confidence used to be computed from rules BEFORE the AI
+  // call and never updated from the AI reply — the "AI" chip was never AI.
+  // Now the AI's own OUTLOOK:/CONFIDENCE: lines win when the AI succeeds;
+  // otherwise the chip is labelled as a rules outlook.
+  let outlookSource = 'rules';
+  if (ai) {
+    const om = ai.match(/OUTLOOK:\s*(Bullish|Bearish|Neutral|Mixed)/i);
+    const cm = ai.match(/CONFIDENCE:\s*(\d{1,3})/i);
+    if (om) { outlook = om[1][0].toUpperCase() + om[1].slice(1).toLowerCase(); outlookSource = 'ai'; }
+    if (cm) { confidence = Math.max(0, Math.min(100, +cm[1])); outlookSource = 'ai'; }
+  }
   const timeframe = /week/i.test(question) ? 'This week' : /swing/i.test(question) ? 'Next 1–4 weeks' : 'Next 1–5 trading days';
   const keyPoints = [
     `Live price $${q?.price} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% today, prev close $${q?.prevClose}) — momentum is ${chg >= 0 ? 'positive' : 'negative'} today.`,
@@ -1259,8 +1509,9 @@ app.post('/api/predictor', auth, async (req, res) => {
   ];
   const risks = ['After-hours moves can reverse at the open', 'Single-day moves are noisy — watch the -5% stop / +10% target lines'];
   let answer = ai || `${symbol} — ${outlook} (${confidence}% confidence).\n${keyPoints.join('\n')}\nRisks: ${risks.join('; ')}.\nTimeframe: ${timeframe}.\n${mode === 'rules' ? '(Rules-only answer — no AI used, unlimited questions.)' : '(AI research unavailable — no AI_API_KEY configured; answer is rules-based from live price, trend and news.)'}`;
-  db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), mode, Date.now());
-  res.json({ outlook, confidence, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, predictorMode: mode, ...predictorLimitInfo(req.user.id, req.user), state: publicState(req.user.id) });
+  db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,mode,outlook_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), mode, outlookSource, Date.now());
+  if (mode === 'ai') db.prepare('INSERT INTO predictor_ai_usage(user_id,created_at) VALUES(?,?)').run(req.user.id, Date.now()); // C4: append-only usage ledger
+  res.json({ outlook, confidence, outlookSource, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, predictorMode: mode, ...predictorLimitInfo(req.user.id, req.user), state: publicState(req.user.id) });
 });
 // How many of today's 2 AI questions a standard member has left.
 // Rules-only questions are unlimited, so they are not counted here.
@@ -1335,13 +1586,16 @@ app.post('/api/feedback/clear', auth, (req, res) => {
 // Settings allow-list: only these keys may be written via /api/settings.
 // startCash is NOT here — it only changes via /api/settings/start-cash,
 // which restarts the game. Anything else in the body is silently dropped.
+// L6/L14: 'theme' was in the allow-list but the server never reads it
+// (theme is localStorage-only in the frontend), and the saved* caps are
+// written by the server itself when Credit Saver toggles — clients must not
+// set them directly. Both are dropped; anything else is still silently ignored.
 const SETTING_KEYS = new Set([
-  'theme', 'dipPct', 'momentumPct', 'pingsOn', 'buyPings', 'sellPings',
+  'dipPct', 'momentumPct', 'pingsOn', 'buyPings', 'sellPings',
   'stopTargetPings', 'soundOn', 'browserNotify', 'autoSell', 'buyDips',
   'buyMomentum', 'overnightPrices', 'liveRefresh', 'autoOn', 'autoMode',
   'style', 'budgetPerBuy', 'maxPositions', 'maxTradesPerDay', 'checkSeconds',
   'creditSaver', 'emailPings', 'emailTrades',
-  'savedMaxTradesPerDay', 'savedCheckSeconds',
 ]);
 const VALID_STYLES = ['scalping', 'day', 'swing', 'position'];
 const VALID_AUTO_MODES = ['rules', 'ai'];
@@ -1393,7 +1647,12 @@ app.post('/api/email/clear', auth, (req, res) => { db.prepare('UPDATE users SET 
 app.post('/api/email/test', auth, async (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
   if (!user?.email) return res.status(400).json({ error: 'Set your email in the Pings tab first' });
-  if (!user.email_verified) return res.status(400).json({ error: 'Verify your email first — enter the 6-digit code we emailed it' });
+  if (!user.email_verified) {
+    // M13: say which state the email is in, and whether email can work at
+    // all on this server — the old message implied a code was on its way.
+    if (!smtpConfigured()) return res.status(400).json({ error: `Your email ${user.pending_email || user.email} is saved but not verified — and no code can be sent, because email isn't configured on this server (SMTP not set up). Ask the owner to add SMTP credentials, then send a code from the Pings tab.` });
+    return res.status(400).json({ error: 'Verify your email first — enter the 6-digit code we emailed it' });
+  }
   const r = await sendEmail(user.email, `${APP_NAME} test email`, `This is a test email from ${APP_NAME}. If you got this, ping and auto-trade emails will reach you.`);
   res.json(r);
 });

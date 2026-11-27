@@ -207,8 +207,14 @@ in `.env` take effect without exporting them first.
    matches `OWNER_NAME` (default `Lucas`, case-insensitive) is the owner —
    the first account created is *not* the owner unless it is named Lucas.
    A non-Lucas first account is just a regular player.
-3. Set your PIN — that's how you sign in. Only the owner account can turn
-   Credit Saver off; every other account gets it forced back on by the server.
+3. Set your PIN (6+ characters) — that's how you sign in. If this is the
+   owner account, also enter the `OWNER_CLAIM_CODE` from the server's
+   environment: without it, owner claims are refused outright, so nobody
+   can take over a fresh deploy by registering "Lucas" first. Generate a
+   code with `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`
+   and set it as an env var — never commit a real one.
+4. Only the owner account can turn Credit Saver off; every other account
+   gets it forced back on by the server.
 
 ## Deploy
 
@@ -228,14 +234,16 @@ in `.env` take effect without exporting them first.
 2. In Render, New → Web Service → pick the repo. Build command:
    `npm install`, Start command: `node server.js`.
 3. Set environment variables in Render → Environment:
-   `OWNER_NAME=Lucas`, plus `AI_API_URL` / `AI_API_KEY` and `SMTP_*` if you
-   want AI and email (see `.env.example`). Leave them unset to run without.
+   `OWNER_NAME=Lucas`, `OWNER_CLAIM_CODE=<your random code>`, plus
+   `AI_API_URL` / `AI_API_KEY` and `SMTP_*` if you want AI and email (see
+   `.env.example`). Leave them unset to run without.
 4. Add a **persistent disk** mounted at `/data` and set `DATA_DIR=/data`
    if you want the SQLite database to survive deploys — otherwise Render's
    ephemeral filesystem resets accounts/trades on each deploy. (Free Render
    services also sleep after inactivity; add a free uptime monitor pinging
    `https://<your-app>.onrender.com/api/health` every few minutes to keep the
-   2-minute auto-trading cycle alive.)
+   auto-trading cycle alive. The cycle ticks every 30 s and each player's
+   auto trader runs when their own check-seconds interval is due.)
 5. Open the URL, create the Lucas owner account first (see above).
 
 ### Option B — Vercel
@@ -264,8 +272,9 @@ Put it behind a reverse proxy (nginx/Caddy) with HTTPS for real users.
 | `PORT` | no (default 3000) | Port to listen on |
 | `DATA_DIR` | no | Where the SQLite DB lives (default `data/` next to `server.js`). Set to `/data` when a persistent disk is mounted there (Render paid plan) — see Deploy. On Render free there is no disk, so data in `data/` is lost on restart/redeploy. |
 | `OWNER_NAME` | no (default `Lucas`) | Owner account name |
+| `OWNER_CLAIM_CODE` | no, but strongly recommended | Secret required to register-with-PIN or claim the owner account. Leave unset and owner claims are refused outright (fail closed). Generate with `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`. Never commit a real one. |
 | `AI_API_URL`, `AI_API_KEY`, `AI_MODEL` | no | OpenAI-compatible chat endpoint for Predictor + AUTO AI mode. Azure OpenAI: `https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01` with your Azure key. Without these, AI mode falls back to rules and says so. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | no | SMTP for ping / auto-trade emails and email-verification codes. Without these, emails are queued + logged and the code/test buttons honestly report "SMTP not configured". |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | no | SMTP for ping / auto-trade emails and email-verification codes. Without these, NO email path works at all: no code is sent, no ping/auto email is queued, and the buttons honestly say so. |
 
 Never hardcode a real key. Keys live in `.env` (local) or the host's
 environment settings (Render/Vercel) only.

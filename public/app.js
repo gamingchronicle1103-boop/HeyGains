@@ -4,7 +4,6 @@ const NAME_MAP = { NVDA: 'NVIDIA', TSLA: 'Tesla', AMD: 'Adv. Micro Devices', MET
 const THEMES = { terminal: '#2bff88', purple: '#b388ff', ice: '#38bdf8', gold: '#ffb02e', pink: '#ff5da2' };
 const CHECK_STEPS = [30, 60, 120, 300];
 const STYLES = { scalping: { stop: -2, target: 3 }, day: { stop: -5, target: 10 }, swing: { stop: -8, target: 20 }, position: { stop: -12, target: 30 } };
-const SUGGESTIONS = [];
 // Migrate legacy localStorage keys to the verityinvest-* keys.
 for (const [oldK, newK] of [['hg_token', 'verityinvest-token'], ['hg_theme', 'verityinvest-theme'], ['hg_welcome_seen', 'verityinvest-welcomed']]) {
   const v = localStorage.getItem(oldK); if (v && !localStorage.getItem(newK)) localStorage.setItem(newK, v);
@@ -258,7 +257,6 @@ async function loadState() {
   $('trade-session-banner').textContent = 'Session: ' + sessionDisplay(state.session) + ' — trading never closes. You fill at the LIVE extended price, never the close.';
   $('footer-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : '';
   renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges(); updatePredLimit();
-  const wc = $('welcome-stat-cash'); if (wc) wc.textContent = fmtCashShort(state.settings.startCash || 100000);
   const unread = state.alerts.filter(a => !a.read).length;
   $('ping-count').textContent = unread; $('ping-count').classList.toggle('hidden', !unread);
   loadExtras(false); // leaderboard / portfolio history / achievements, throttled to 60 s
@@ -310,7 +308,7 @@ async function loadQuotes() {
   if (state && state.settings?.liveRefresh === false) return;
   try {
     const j = await api('/api/quotes'); quotes = j.quotes;
-    $('quotes-updated').textContent = 'Quotes updated ' + new Date(j.updatedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    $('quotes-updated').textContent = 'Quotes updated ' + new Date(j.updatedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' }) + (j.stale ? ' · STALE — live feed down, showing last cached prices' : '');
     const sb = $('session-badge'); sb.textContent = sessionDisplay(j.session); sb.className = 'badge ' + sessionBadgeClass(j.session);
     renderWatchlist(); renderTickerTape(); updatePredCurrent(); updateTradeEstimates();
     if (chartRange === '1D' || Date.now() - lastChartLoad > 60000) await loadChart();
@@ -494,11 +492,16 @@ function renderCustomList() {
 }
 
 // ---------- Chart ----------
+// H2: every loadChart() call gets a token; a slow response that finishes
+// after a newer call started is ignored, so a stale fetch can never
+// overwrite the current ticker/range.
+let chartLoadToken = 0;
 async function loadChart() {
+  const myToken = ++chartLoadToken;
   $('chart-error').classList.add('hidden');
   hoverIdx = -1; const _tip = $('chart-tip'); if (_tip) _tip.classList.add('hidden');
-  try { chartData = await api(`/api/history?symbol=${chartSymbol}&range=${chartRange}`); lastChartLoad = Date.now(); }
-  catch (e) { $('chart-error').textContent = 'Chart is warming up — the feed didn\'t answer. '; const b = document.createElement('button'); b.className = 'btn small'; b.textContent = 'Retry'; b.onclick = loadChart; $('chart-error').appendChild(b); $('chart-error').classList.remove('hidden'); return; }
+  try { const data = await api(`/api/history?symbol=${chartSymbol}&range=${chartRange}`); if (myToken !== chartLoadToken) return; chartData = data; lastChartLoad = Date.now(); }
+  catch (e) { if (myToken !== chartLoadToken) return; $('chart-error').textContent = 'Chart is warming up — the feed didn\'t answer. '; const b = document.createElement('button'); b.className = 'btn small'; b.textContent = 'Retry'; b.onclick = loadChart; $('chart-error').appendChild(b); $('chart-error').classList.remove('hidden'); return; }
   const q = quotes[chartSymbol];
   $('chart-title').textContent = chartSymbol + ' — ' + symName(chartSymbol);
   const priceEl = $('chart-price');
@@ -514,8 +517,15 @@ async function loadChart() {
     $('chart-ext').textContent = `Overnight ${pct(extPct)} · 4 PM close ${money(q.regularClose)} · last trade ${q.lastTrade || '—'}${q.frozenAtClose ? ' · frozen at close (overnight off)' : ''}`;
   }
   const intervals = { '1D': '1-minute', '5D': '15-minute', '1M': 'daily', '3M': 'daily', '6M': 'weekly', '1Y': 'weekly', '5Y': 'monthly' };
-  const rsi = computeRSI(chartData.points.map(p => p.c));
-  $('chart-caption').textContent = `${chartRange} · ${intervals[chartRange]} bars · ${chartData.points.length} bars${chartRange === '1D' ? ' · purple shading = premarket / after-hours' : ''} · 1 candle per source bar (max 220 candles) · RSI(14) ${rsi == null ? '—' : rsi.toFixed(0) + ' (' + rsiLabel(rsi) + ')'}`;
+  // M8: RSI is computed over REAL bars only — filled (f=1) points are
+  // synthetic flat carries, and the old code let 421 of them drag RSI to 50.
+  const realCloses = chartData.points.filter(p => !p.f).map(p => p.c);
+  const rsi = computeRSI(realCloses);
+  // M9: the old caption lied ("1 candle per source bar") — candles actually
+  // group ceil(points/220) bars each. Say so, and say what MA20 means.
+  const candleNote = `${chartData.candles?.length || 0} candles · ${chartData.candleStep || 1} bar${(chartData.candleStep || 1) > 1 ? 's' : ''} per candle`;
+  const maNote = showMA20 ? ` · MA20 over 20 ${chartMode === 'candles' ? 'candles' : 'bars'}` : '';
+  $('chart-caption').textContent = `${chartRange} · ${intervals[chartRange]} bars · ${chartData.points.length} bars${chartRange === '1D' ? ' · purple shading = premarket / after-hours' : ''} · ${candleNote} · RSI(14) ${rsi == null ? '—' : rsi.toFixed(0) + ' (' + rsiLabel(rsi) + ')'}${maNote}`;
   drawChart();
 }
 // Chart indicators — pure functions of closes, so they can be unit-tested.
@@ -565,10 +575,17 @@ function drawChart() {
   const X = i => 52 + (i / (pts.length - 1)) * (W - 72);
   const Y = v => 18 + (1 - (v - min) / (max - min)) * (H - 52);
   if (chartRange === '1D') {
+    // H3: shading boundaries come from the real session the server sent
+    // (regularStart/regularEnd), not hardcoded 9:30/16:00 — on early-close
+    // days 13:00–16:00 used to draw unshaded as regular hours. Fallback is
+    // the old 570/960 when the server didn't send them.
+    const regStartM = chartData.regularStart != null ? etMins(chartData.regularStart) : 570;
+    const regEndM = chartData.regularEnd != null ? etMins(chartData.regularEnd) : 960;
     ctx.fillStyle = 'rgba(179,136,255,0.14)';
     let start = null, label = '';
-    const flush = (endIdx) => { if (start !== null) { ctx.fillRect(X(start), 0, X(endIdx) - X(start), H - 32); ctx.fillStyle = '#c4a8ff'; ctx.fillText(label, X(start) + 6, 14); ctx.fillStyle = 'rgba(179,136,255,0.14)'; start = null; } };
-    pts.forEach((p, i) => { const m = etMins(p.t); const ah = m < 570 || m >= 960; if (ah && start === null) { start = i; label = m < 570 ? 'PRE' : 'AFTER HOURS'; } if (!ah && start !== null) flush(i); });
+    const barW = (W - 72) / Math.max(1, pts.length - 1);
+    const flush = (endIdx) => { if (start !== null) { ctx.fillRect(X(start), 0, (X(endIdx) + barW) - X(start), H - 32); ctx.fillStyle = '#c4a8ff'; ctx.fillText(label, X(start) + 6, 14); ctx.fillStyle = 'rgba(179,136,255,0.14)'; start = null; } }; // H3: flush covers the last bar too (was one bar short)
+    pts.forEach((p, i) => { const m = etMins(p.t); const ah = m < regStartM || m >= regEndM; if (ah && start === null) { start = i; label = m < regStartM ? 'PRE' : 'AFTER HOURS'; } if (!ah && start !== null) flush(i); });
     flush(pts.length - 1);
   }
   ctx.strokeStyle = '#1e2a22'; ctx.fillStyle = '#7d8f83'; ctx.lineWidth = 1;
@@ -595,7 +612,9 @@ function drawChart() {
   {
     const series = chartMode === 'candles' ? (chartData.candles || []) : pts;
     if (series.length) {
-      const maxV = Math.max(...series.map(p => p.v || 0), 1);
+      // L12: volume bars share one scale in both modes (max over the raw
+      // points), instead of each mode scaling to its own max.
+      const maxV = Math.max(...pts.map(p => p.v || 0), 1);
       const vTop = H - 50, vBot = H - 34;
       series.forEach((p, i) => {
         const v = p.v || 0; if (!v) return;
@@ -606,13 +625,19 @@ function drawChart() {
         ctx.fillRect(x - w / 2, vBot - hgt, w, hgt);
       });
       if (showMA20) {
-        const ma = computeMA(series.map(p => p.c), 20);
+        // M8: MA20 over REAL closes only (filled flat points excluded), so
+        // in candle mode it is 20 candles of real bars and in line mode 20
+        // real minutes — never 20 synthetic flat points.
+        const realIdx = [];
+        pts.forEach((p, i) => { if (!p.f) realIdx.push(i); });
+        const ma = computeMA(realIdx.map(i => pts[i].c), 20);
         if (ma.some(v => v != null)) {
           ctx.strokeStyle = '#b388ff'; ctx.lineWidth = 1.5; ctx.beginPath();
           let started = false;
-          ma.forEach((v, i) => {
+          ma.forEach((v, j) => {
             if (v == null) return;
-            const x = chartMode === 'candles' ? 52 + (i + 0.5) / series.length * (W - 72) : X(i);
+            const i = realIdx[j];
+            const x = chartMode === 'candles' ? 52 + ((i / (chartData.candleStep || 1)) + 0.5) / series.length * (W - 72) : X(i);
             if (!started) { ctx.moveTo(x, Y(v)); started = true; } else ctx.lineTo(x, Y(v));
           });
           ctx.stroke();
@@ -625,8 +650,13 @@ function drawChart() {
     // 1D compares the last price to prevClose; other ranges compare the
     // last close to the first close. Green when the period is up, red
     // when it's down.
+    // M12: colour the line from the LIVE quote when one is available, not
+    // the last chart point — the header % already uses the live quote, and
+    // the two used to disagree while the chart was stale.
+    const liveQ = quotes[chartSymbol];
     const base = chartRange === '1D' ? (chartData.prevClose ?? pts[0].c) : pts[0].c;
-    const lineColor = pts[pts.length - 1].c >= base ? '#2bff88' : '#ff4757';
+    const endVal = (chartRange === '1D' && liveQ) ? liveQ.price : pts[pts.length - 1].c;
+    const lineColor = endVal >= base ? '#2bff88' : '#ff4757';
     const grad = ctx.createLinearGradient(0, 18, 0, H - 32); grad.addColorStop(0, lineColor + '55'); grad.addColorStop(1, lineColor + '00');
     ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.c)) : ctx.moveTo(X(i), Y(p.c)));
     ctx.lineTo(X(pts.length - 1), H - 32); ctx.lineTo(X(0), H - 32); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
@@ -678,14 +708,16 @@ function bindChartHover() {
     hoverIdx = i;
     const px = chartMode === 'candles' ? 52 + (i + 0.5) / n * (chartGeom.W - 72) : chartGeom.X(i);
     const py = chartGeom.Y(p.c);
-    tip.innerHTML = chartMode === 'candles'
-      ? `<b>${money(p.c)}</b><br>${fmtTip(p.t)}<br>O ${money(p.o)} · H ${money(p.h)} · L ${money(p.l)} · C ${money(p.c)}`
-      : `<b>${money(p.c)}</b><br>${fmtTip(p.t)}`;
+    // L10: OHLC + volume in BOTH modes (line mode used to show close +
+    // time only), and clamp the tooltip inside the chart vertically too —
+    // it used to clip off the top.
+    tip.innerHTML = `<b>${money(p.c)}</b><br>${fmtTip(p.t)}<br>O ${money(p.o)} · H ${money(p.h)} · L ${money(p.l)} · C ${money(p.c)}${p.v ? `<br>Vol ${Number(p.v).toLocaleString('en-US')}` : ''}`;
     tip.classList.remove('hidden');
     // Keep the tooltip inside the chart: flip it left when near the right edge.
     const tipW = tip.offsetWidth || 140;
+    const tipH = tip.offsetHeight || 80;
     tip.style.left = Math.max(4, Math.min(chartGeom.W - tipW - 4, px + 12)) + 'px';
-    tip.style.top = Math.max(4, py - 10) + 'px';
+    tip.style.top = Math.max(4, Math.min(chartGeom.H - tipH - 4, py - 10)) + 'px';
     drawChart();
   };
   const hideTip = () => { if (hoverIdx === -1) return; hoverIdx = -1; tip.classList.add('hidden'); drawChart(); };
@@ -728,7 +760,8 @@ function updateTradeEstimates() {
   renderQuickSize();
   if (!q) { $('trade-est').textContent = 'Waiting for a live price…'; $('trade-cash-after').textContent = ''; $('trade-position-line').textContent = ''; return; }
   const total = shares * q.price;
-  flashNum($('trade-est'), total, tradeSide === 'buy' ? `Est. cost: ${money(total)} (${shares} × ${money(q.price)})` : `Est. proceeds: ${money(total)} (${shares} × ${money(q.price)})`);
+  const frozenNote = q.frozenAtClose ? ' · frozen at the 4 PM close (overnight prices off)' : '';
+  flashNum($('trade-est'), total, (tradeSide === 'buy' ? `Est. cost: ${money(total)} (${shares} × ${money(q.price)})` : `Est. proceeds: ${money(total)} (${shares} × ${money(q.price)})`) + frozenNote);
   flashNum($('trade-cash-after'), tradeSide === 'buy' ? state.cash - total : state.cash + total, 'Cash after: ' + money(tradeSide === 'buy' ? state.cash - total : state.cash + total));
   const pos = heldPosition(chartSymbol);
   if (!pos) $('trade-position-line').textContent = 'You hold no ' + chartSymbol + ' yet. SELL opens a short — you profit if the price falls; BUY while short covers it.';
@@ -792,7 +825,7 @@ async function placeOrder() {
   try {
     const j = await api('/api/orders', { method: 'POST', body: JSON.stringify({ symbol: $('order-symbol').value, side: orderSide, type: $('order-type').value, targetPrice: target, shares }) });
     state = j.state; renderOrders(); loadExtras(true);
-    $('order-msg').textContent = j.filledNow ? 'Order filled immediately at the target price.' : 'Order placed — it fills at the target price when the live price touches it.';
+    $('order-msg').textContent = j.filledNow ? 'Order filled immediately at the target price or better.' : 'Order placed — it fills at the target price or better when the live price touches it.';
   } catch (e) { $('order-msg').textContent = 'Order failed: ' + e.message; }
 }
 
@@ -929,7 +962,7 @@ function renderPredHistory() {
       ? `<p class="pred-answer-short">${escapeHtml(answer.slice(0, 900))}…</p><p class="pred-answer-full hidden">${escapeHtml(answer)}</p><p><button class="btn small" data-readmore>Read more</button></p>`
       : `<p>${escapeHtml(answer)}</p>`;
     return `<div class="pred-card">
-      <p><span class="chip ${c.outlook === 'Bullish' ? 'buy' : c.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(c.outlook)}</span> <strong>${escapeHtml(c.symbol)}</strong> · ${escapeHtml(c.timeframe || '')} · price at ask ${money(c.price_at_ask || 0)} · ${fmtDT(c.created_at)}</p>
+      <p><span class="chip ${c.outlook === 'Bullish' ? 'buy' : c.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(c.outlook)}</span> <strong>${escapeHtml(c.symbol)}</strong> · ${escapeHtml(c.timeframe || '')} · price at ask ${money(c.price_at_ask || 0)} · ${fmtDT(c.created_at)}${c.outlook_source === 'rules' ? ' · <span class="tag amber">RULES OUTLOOK</span>' : ''}</p>
       <p class="muted">“${escapeHtml(c.question)}”</p>
       ${ansHtml}
       <p>CONFIDENCE ${Number(c.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(c.confidence) || 0}%"></i></div>
@@ -961,7 +994,7 @@ async function askPredictor() {
     if (j.predictorRemaining != null) state.predictorRemaining = j.predictorRemaining;
     if (j.predictorUsed != null) state.predictorUsed = j.predictorUsed;
     updatePredLimit();
-    $('pred-answer').innerHTML = `<div class="pred-card"><p><span class="chip ${j.outlook === 'Bullish' ? 'buy' : j.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(j.outlook)}</span> <strong>${escapeHtml(chartSymbol)}</strong> · ${escapeHtml(j.timeframe || '')} · price at ask ${money(j.priceAtAsk || 0)}${j.predictorMode === 'rules' ? ' · <span class="tag">RULES ONLY</span>' : ''}</p><p>${escapeHtml(j.answer)}</p><p>CONFIDENCE ${Number(j.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(j.confidence) || 0}%"></i></div>${(j.keyPoints || []).length ? '<p><strong>Key points</strong></p><ul>' + j.keyPoints.map(k => `<li>${escapeHtml(k)}</li>`).join('') + '</ul>' : ''}${(j.risks || []).length ? `<p class="muted small">Risks: ${escapeHtml(j.risks.join('; '))}</p>` : ''}</div>`;
+    $('pred-answer').innerHTML = `<div class="pred-card"><p><span class="chip ${j.outlook === 'Bullish' ? 'buy' : j.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(j.outlook)}</span> <strong>${escapeHtml(chartSymbol)}</strong> · ${escapeHtml(j.timeframe || '')} · price at ask ${money(j.priceAtAsk || 0)}${j.predictorMode === 'rules' ? ' · <span class="tag">RULES ONLY</span>' : ''}${j.outlookSource === 'rules' ? ' · <span class="tag amber">RULES OUTLOOK</span>' : ''}</p><p>${escapeHtml(j.answer)}</p><p>CONFIDENCE ${Number(j.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(j.confidence) || 0}%"></i></div>${(j.keyPoints || []).length ? '<p><strong>Key points</strong></p><ul>' + j.keyPoints.map(k => `<li>${escapeHtml(k)}</li>`).join('') + '</ul>' : ''}${(j.risks || []).length ? `<p class="muted small">Risks: ${escapeHtml(j.risks.join('; '))}</p>` : ''}</div>`;
     state = j.state; renderPredHistory(); updatePredLimit(); loadExtras(true); // track record gains a new (pending) call
   } catch (e) {
     // A 429 means the AI daily limit was hit — the server did not record
@@ -1013,7 +1046,7 @@ function updateAutoUI() {
   const today = new Date().toISOString().slice(0, 10);
   const tradesToday = state.trades.filter(t => (t.source || '').startsWith('auto') && new Date(t.created_at).toISOString().slice(0, 10) === today).length;
   const modeLabel = s.autoMode === 'ai' ? 'Verity AI' : 'Rules only';
-  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Server cycle: <b>Runs 24/7</b> — even with this page closed<br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
+  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Server cycle: runs while the server is awake, even with this page closed${s.creditSaver ? ' — market hours only under Credit Saver' : ''}<br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
   $('auto-status').innerHTML = statusHtml;
 }
 function renderAutoLog() {
@@ -1085,6 +1118,7 @@ function showAuth(mode) {
   $('auth-mode-new').classList.toggle('active', authMode === 'new');
   $('auth-email-wrap').classList.toggle('hidden', authMode === 'signin');
   $('auth-startcash-wrap').classList.toggle('hidden', authMode === 'signin');
+  $('auth-claimcode-wrap').classList.toggle('hidden', authMode === 'signin');
   $('btn-auth-go').textContent = authMode === 'signin' ? 'SIGN IN' : 'CREATE MY ACCOUNT';
 }
 function enterApp() {
@@ -1280,7 +1314,7 @@ async function tryAuth(path, body) {
   } catch (e) { $('auth-error').textContent = e.message; }
 }
 $('btn-auth-go').onclick = () => {
-  if (authMode === 'new') tryAuth('/api/auth/register', { name: $('auth-name').value, pin: $('auth-pin').value, email: $('auth-email').value, startCash: Number($('auth-startcash').value) || 100000 });
+  if (authMode === 'new') tryAuth('/api/auth/register', { name: $('auth-name').value, pin: $('auth-pin').value, email: $('auth-email').value, startCash: Number($('auth-startcash').value) || 100000, claimCode: $('auth-claim-code')?.value || '' });
   else tryAuth('/api/auth/login', { name: $('auth-name').value, pin: $('auth-pin').value });
 };
 $('btn-verify').onclick = async () => { if (await verifyCode($('verify-code').value, 'verify-msg')) { enterApp(); try { await refreshAll(); $('app-loading').classList.add('hidden'); } catch {} } };
@@ -1289,7 +1323,7 @@ $('btn-skip-verify').onclick = () => { enterApp(); refreshAll().then(() => $('ap
 $('btn-retry-app').onclick = async () => { $('app-error').classList.add('hidden'); $('app-loading').classList.remove('hidden'); try { await refreshAll(); $('app-loading').classList.add('hidden'); } catch { $('app-loading').classList.add('hidden'); $('app-error').classList.remove('hidden'); } };
 $('btn-claim').onclick = async () => {
   try {
-    const j = await api('/api/auth/claim', { method: 'POST', body: JSON.stringify({ name: claimName, pin: $('claim-pin').value }) });
+    const j = await api('/api/auth/claim', { method: 'POST', body: JSON.stringify({ name: claimName, pin: $('claim-pin').value, claimCode: $('claim-code')?.value || '' }) });
     token = j.token; localStorage.setItem('verityinvest-token', token);
     saveDeviceAccount(claimName); // claimed on this device — show it here
     $('claim-block').classList.add('hidden'); enterApp();
@@ -1355,7 +1389,9 @@ function applyServerConfigBadges() {
     const el = $(id); if (el) el.classList.toggle('hidden', !smtpOff);
   }
   const rulesOnly = serverConfig.aiConfigured === false;
-  const autoBadge = $('auto-ai-badge'); if (autoBadge) autoBadge.classList.toggle('hidden', !rulesOnly);
+  // L13: like the Predictor badge, the AUTO badge only shows when Rules
+  // only is actually selected — the old code showed it in AI mode too.
+  const autoBadge = $('auto-ai-badge'); if (autoBadge) autoBadge.classList.toggle('hidden', !(rulesOnly && state?.settings?.autoMode === 'rules'));
   // Predictor badge is mode-aware: it only says "Rules-only mode" when the
   // player actually has Rules only selected. In Verity AI mode the badge
   // hides — but with no AI key the AI answer still falls back to rules

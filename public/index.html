@@ -19,8 +19,8 @@
   <div class="welcome-card">
     <p class="eyebrow">HeyGains · Stock Trading Simulator</p>
     <h1>REAL PRICES. FAKE MONEY. ALL YOURS TO PLAY.</h1>
-    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Choose your amount of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the Verity AI Predictor, get buy/sell pings, and let the auto trader run 24/7. No real money, no real orders.</p>
-    <div class="stat-chips"><span id="welcome-stat-cash">You choose the amount of money to start</span><span>12 default tickers</span><span>Runs 24/7</span></div>
+    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Choose your amount of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the Verity AI Predictor, get buy/sell pings, and let the auto trader run while the server is awake. No real money, no real orders.</p>
+    <div class="stat-chips"><span id="welcome-stat-cash">You choose the amount of money to start</span><span>12 default tickers</span><span>Auto runs while server is awake</span></div>
     <div class="row">
       <button id="btn-welcome-create" class="btn primary big">CREATE MY ACCOUNT</button>
       <button id="btn-welcome-signin" class="btn big">I ALREADY HAVE ONE</button>
@@ -34,14 +34,14 @@
       <li><b>TRADE IT LIKE IT'S REAL</b>Fractional shares, live extended fills, and your −5% stop / +10% target guardrails.</li>
       <li><b>VERITY AI PREDICTOR</b>Ask about any ticker and get Bullish / Bearish / Neutral / Mixed with confidence.</li>
       <li><b>BUY/SELL PINGS</b>Dip, momentum, stop and target pings — in the app, by sound, and by email.</li>
-      <li><b>AUTO TRADER 24/7</b>Verity AI runs the sim around the clock, with research before every buy.</li>
+      <li><b>AUTO TRADER · AROUND THE CLOCK</b>Verity AI runs the sim while the server is awake, with research before every buy.</li>
       <li><b>YOUR OWN GAME</b>Your own account, your own cash, your own picks, your own email.</li>
     </ul>
     <h3>HOW IT WORKS</h3>
     <div class="steps">
       <div><b>1 · CREATE YOUR ACCOUNT</b>Pick a name, a PIN, and how much fake cash you start with.</div>
       <div><b>2 · TRADE THE BOARD</b>Buy and sell the 12 default tickers — or add more of your own stocks and crypto.</div>
-      <div><b>3 · LET IT RUN</b>Turn on pings and the auto trader and let HeyGains watch the market 24/7.</div>
+      <div><b>3 · LET IT RUN</b>Turn on pings and the auto trader and let HeyGains watch the market while the server is awake (market hours only with Credit Saver on).</div>
     </div>
     <h3>THE BOARD</h3>
     <div class="board-grid" id="welcome-board"></div>
@@ -70,18 +70,23 @@
     <div id="player-list"><p class="muted">LOADING PLAYERS…</p></div>
     <div id="claim-block" class="verify-block hidden">
       <p><strong id="claim-name"></strong> has no PIN yet.</p>
-      <input id="claim-pin" type="password" placeholder="Choose a PIN (4+ characters)" autocomplete="new-password">
+      <input id="claim-pin" type="password" placeholder="Choose a PIN (6+ characters)" autocomplete="new-password">
+      <input id="claim-code" type="password" placeholder="Owner claim code — only needed if this is the Lucas (owner) account" autocomplete="off">
       <div class="row"><button id="btn-claim" class="btn primary">SET PIN &amp; CLAIM IT</button><button id="btn-claim-cancel" class="btn small">Cancel</button></div>
       <p id="claim-msg" class="muted"></p>
     </div>
     <label>Your name <input id="auth-name" placeholder="Your name" autocomplete="username"></label>
-    <label>PIN <input id="auth-pin" type="password" placeholder="PIN (4+ characters)" autocomplete="current-password"></label>
+    <label>PIN <input id="auth-pin" type="password" placeholder="PIN (6+ characters)" autocomplete="current-password"></label>
     <div id="auth-email-wrap">
       <label>Email for pings (optional) <input id="auth-email" type="email" placeholder="you@example.com — we'll send a 6-digit code"></label>
     </div>
     <div id="auth-startcash-wrap">
       <label>Choose your amount of fake cash <input id="auth-startcash" type="number" min="100" max="10000000" step="100" value="100000" inputmode="numeric"></label>
       <p class="muted small">$100–$10,000,000. This is the fake cash your game starts with.</p>
+    </div>
+    <div id="auth-claimcode-wrap">
+      <label>Owner claim code (only if this is the Lucas account) <input id="auth-claim-code" type="password" placeholder="Claim code from the server owner — leave blank for a regular player" autocomplete="off"></label>
+      <p class="muted small">The Lucas (owner) account needs the server's owner claim code. Regular players leave this blank.</p>
     </div>
     <div class="row">
       <button id="btn-auth-go" class="btn primary big">SIGN IN</button>
@@ -93,7 +98,7 @@
       <div class="row"><button id="btn-verify" class="btn primary">VERIFY &amp; START PLAYING</button><button id="btn-resend" class="btn small">RESEND CODE</button><button id="btn-skip-verify" class="btn small">SKIP — VERIFY LATER IN PINGS</button></div>
       <p id="verify-msg" class="muted"></p>
     </div>
-    <p class="muted small">Your PIN is stored hashed — never in plain text. The owner account is whoever is named Lucas (exact name match) — not whoever signed up first.</p>
+    <p class="muted small">Your PIN is stored hashed (scrypt) — never in plain text. The owner account is whoever is named Lucas (exact name match) — not whoever signed up first — and claiming it needs the server's owner claim code.</p>
     <p><button id="btn-back-welcome" class="btn small">NEW HERE? SEE WHAT HEYGAINS IS</button></p>
     <p class="footer">Created by Lucas Do</p>
   </div>
@@ -244,8 +249,8 @@
   <!-- ===== AUTO ===== -->
   <section id="tab-auto" class="tabpage hidden">
     <div class="card">
-      <h2>AUTO TRADING · VERITY AI RUNS THE SIM <span id="auto-ai-badge" class="tag amber hidden">Rules-only mode — no AI key</span></h2>
-      <p class="muted">The auto trader watches the board around the clock — even with this page closed — and buys the dips and momentum it finds, then sells at your style's lines.</p>
+      <h2>AUTO TRADING · VERITY AI RUNS THE SIM WHILE THE SERVER IS AWAKE <span id="auto-ai-badge" class="tag amber hidden">Rules-only mode — no AI key</span></h2>
+      <p class="muted">The auto trader watches the board while the server is awake — even with this page closed — and buys the dips and momentum it finds, then sells at your style's lines. With Credit Saver on it only trades during market hours.</p>
       <div class="saver-box" id="saver-box">
         <strong>CREDIT SAVER</strong> <span id="saver-state"></span>
         <p class="muted small" style="margin:6px 0 0">Credit Saver bundle: 30-second rules checks, the decider only runs when a real signal fires (strongest one only), market hours only (9:30 AM–4:00 PM ET), max 2 trades/day.</p>
@@ -403,7 +408,7 @@
       <p id="set-feedback-msg" class="muted"></p>
     </div>
     <div class="card"><h3>ABOUT &amp; DANGER ZONE</h3>
-      <p class="muted small">What is HeyGains? HeyGains is a paper trading simulator created by Lucas Do — real live prices, fake money, no real orders. Choose your amount of fake cash, trade 12 tickers plus your own stocks and crypto, get pings and Predictor answers, and let the auto trader run 24/7.</p>
+      <p class="muted small">What is HeyGains? HeyGains is a paper trading simulator created by Lucas Do — real live prices, fake money, no real orders. Choose your amount of fake cash, trade 12 tickers plus your own stocks and crypto, get pings and Predictor answers, and let the auto trader run while the server is awake.</p>
       <div class="row"><button id="btn-reset2" class="btn small danger">Reset my game</button></div>
       <h3>Delete account</h3>
       <div id="delete-row"></div>
@@ -414,7 +419,7 @@
 
 <footer>
   <p><strong>THE GAME</strong></p>
-  <p>HeyGains lets you choose your amount of fake cash and gives you real live quotes for 12 tickers plus your own stocks and crypto, refreshing every 10 seconds. Trading never closes — you can buy and sell in any session, at the live extended price, never the close. The guardrails are −5% stop / +10% target, the Predictor answers your questions, buy/sell pings watch your lines, and the Auto Trader can run the whole thing 24/7. Paper trading only — no real money, no real orders.</p>
+  <p>HeyGains lets you choose your amount of fake cash and gives you real live quotes for 12 tickers plus your own stocks and crypto, refreshing every 10 seconds. Trading never closes — you can buy and sell in any session, at the live extended price, never the close. The guardrails are −5% stop / +10% target, the Predictor answers your questions, buy/sell pings watch your lines, and the Auto Trader can run the whole thing while the server is awake (market hours only with Credit Saver on). Paper trading only — no real money, no real orders.</p>
   <p id="footer-best-run" class="muted"></p>
   <div class="row" style="justify-content:center"><button id="btn-footer-what" class="btn small">What is HeyGains?</button></div>
   <p>Created by Lucas Do</p>
