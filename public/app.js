@@ -530,7 +530,7 @@ async function loadChart() {
   // M9: the old caption lied ("1 candle per source bar") — candles actually
   // group ceil(points/220) bars each. Say so, and say what MA20 means.
   const candleNote = `${chartData.candles?.length || 0} candles · ${chartData.candleStep || 1} bar${(chartData.candleStep || 1) > 1 ? 's' : ''} per candle`;
-  const maNote = showMA20 ? ` · MA20 over 20 ${chartMode === 'candles' ? 'candles' : 'bars'}` : '';
+  const maNote = showMA20 ? ` · MA20 over 20 ${chartMode === 'candles' ? 'candles' : 'bars'} (running avg for first 19)` : '';
   $('chart-caption').textContent = `${chartRange} · ${intervals[chartRange]} bars · ${chartData.points.length} bars${chartRange === '1D' ? ' · purple shading = premarket / after-hours' : ''} · ${candleNote} · RSI(14) ${rsi == null ? '—' : rsi.toFixed(0) + ' (' + rsiLabel(rsi) + ')'}${maNote}`;
   if (chartRange === '1D') {
     // Session-aware note: on an early-close day after-hours starts at the
@@ -540,14 +540,70 @@ async function loadChart() {
   }
   drawChart();
 }
-// Chart indicators — pure functions of closes, so they can be unit-tested.
+// MA20: a 20-period average that is DEFINED from the first bar — until 20
+// periods exist it is the running average of the closes so far (mean of
+// closes[0..i]). The old strict version left the first 19 points null, so
+// on short series the line was a stub: NVDA 6M (~28 weekly bars) only drew
+// the last 9 points, 1M (~22 daily bars) only the last 3. Now the line
+// spans the whole chart in both modes.
 function computeMA(closes, period) {
   const out = new Array(closes.length).fill(null);
   let sum = 0;
   for (let i = 0; i < closes.length; i++) {
     sum += closes[i];
     if (i >= period) sum -= closes[i - period];
-    if (i >= period - 1) out[i] = sum / period;
+    out[i] = sum / Math.min(i + 1, period);
+  }
+  return out;
+}
+// Pure helper: MA20 points for the series actually drawn, so the math can
+// be tested without a canvas. Returns [{pos, v, brk}]: pos is a pts index
+// in line mode or a candle index in candle mode, v the MA value, brk true
+// when a session gap sits just before this point (line breaks there).
+// Candle mode averages 20 CANDLE closes (the old code averaged 20 bars
+// and plotted them at fractional candle positions — wrong values at wrong
+// x). Line mode averages the 20 points of the drawn line, carries included
+// (a flat minute is the price not moving), with the window resetting at
+// session gaps so one day never averages the previous day's closes. Gaps
+// are read off the point grid itself (1D/5D only): the grid is filled
+// inside a day, so a jump in it is an overnight/weekend/holiday break.
+// Daily+ ranges routinely span weekends and the price line connects there,
+// so no breaks there.
+function maSeries(chartData, mode) {
+  const pts = chartData.points || [];
+  const stepMs = chartData.range === '1D' ? 60000 : chartData.range === '5D' ? 15 * 60 * 1000 : 0;
+  const gapBefore = new Set();
+  if (stepMs) {
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].t - pts[i - 1].t > stepMs * 1.5) gapBefore.add(i);
+    }
+  }
+  const hasGapBetween = (a, b) => { for (let k = a + 1; k <= b; k++) if (gapBefore.has(k)) return true; return false; };
+  if (mode === 'candles') {
+    const candles = chartData.candles || [];
+    const step = chartData.candleStep || 1;
+    return computeMA(candles.map(c => c.c), 20).map((v, k) => ({
+      pos: k, v,
+      brk: k > 0 && hasGapBetween(k * step - 1, k * step)
+    }));
+  }
+  // Line mode: the MA averages the DRAWN line — every point on the grid,
+  // carries included. A flat minute means the price didn't move, so the
+  // last traded price is the honest value there; averaging real bars only
+  // made thin tickers' MA start halfway across the chart (DUOL 1D: first
+  // real bar is ~58% in; FANG/MCD similar) and its last point stop short
+  // of the right edge. The window resets at session gaps (5D), so Monday
+  // never averages Friday's closes; seeding keeps the line spanning.
+  const segs = [];
+  let segStart = 0;
+  for (let i = 1; i <= pts.length; i++) {
+    if (i === pts.length || gapBefore.has(i)) { segs.push([segStart, i]); segStart = i; }
+  }
+  const out = [];
+  for (const [a, b] of segs) {
+    computeMA(pts.slice(a, b).map(p => p.c), 20).forEach((v, k) => {
+      out.push({ pos: a + k, v, brk: k === 0 && a > 0 });
+    });
   }
   return out;
 }
@@ -651,20 +707,19 @@ function drawChart() {
         ctx.fillRect(x - w / 2, vBot - hgt, w, hgt);
       });
       if (showMA20) {
-        // M8: MA20 over REAL closes only (filled flat points excluded), so
-        // in candle mode it is 20 candles of real bars and in line mode 20
-        // real minutes — never 20 synthetic flat points.
-        const realIdx = [];
-        pts.forEach((p, i) => { if (!p.f) realIdx.push(i); });
-        const ma = computeMA(realIdx.map(i => pts[i].c), 20);
-        if (ma.some(v => v != null)) {
+        // MA20 is a true 20-period average of what is drawn — 20 candles
+        // in candle mode, 20 grid points in line mode — seeded with the
+        // running average so the line starts at the first bar (on 6M the
+        // old strict MA only drew the last 9 of 28 points). Breaks at
+        // session gaps on 1D/5D instead of joining across them.
+        const maPts = maSeries(chartData, chartMode);
+        if (maPts.length) {
           ctx.strokeStyle = '#b388ff'; ctx.lineWidth = 1.5; ctx.beginPath();
           let started = false;
-          ma.forEach((v, j) => {
-            if (v == null) return;
-            const i = realIdx[j];
-            const x = chartMode === 'candles' ? 52 + ((i / (chartData.candleStep || 1)) + 0.5) / series.length * (W - 72) : X(i);
-            if (!started) { ctx.moveTo(x, Y(v)); started = true; } else ctx.lineTo(x, Y(v));
+          maPts.forEach(p => {
+            if (p.v == null) return;
+            const x = chartMode === 'candles' ? 52 + (p.pos + 0.5) / series.length * (W - 72) : X(p.pos);
+            if (!started || p.brk) { ctx.moveTo(x, Y(p.v)); started = true; } else ctx.lineTo(x, Y(p.v));
           });
           ctx.stroke();
         }
