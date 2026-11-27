@@ -212,8 +212,12 @@ async function fetchLiveQuotes(symbols = null) {
       const meta = res.meta || {};
       const ts = res.timestamp || [];
       const closes = (res.indicators?.quote?.[0]?.close || []);
+      const vols = (res.indicators?.quote?.[0]?.volume || []);
+      const postEndQ = meta.currentTradingPeriod?.post?.end ?? null;
+      const regEndQ = meta.currentTradingPeriod?.regular?.end ?? null;
       let lastBar = null;
-      for (let i = ts.length - 1; i >= 0; i--) { if (closes[i] != null) { lastBar = { t: ts[i] * 1000, price: closes[i] }; break; } }
+      // Skip the same stale zero-volume post-market bars as the chart does.
+      for (let i = ts.length - 1; i >= 0; i--) { if (closes[i] == null) continue; if (postEndQ && ts[i] > postEndQ) continue; if (regEndQ && ts[i] > regEndQ && (vols[i] ?? 0) === 0) continue; lastBar = { t: ts[i] * 1000, price: closes[i] }; break; }
       const regEnd = meta.currentTradingPeriod?.regular?.end;
       let trueClose = null;
       if (regEnd) for (let i = ts.length - 1; i >= 0; i--) { if (ts[i] <= regEnd && closes[i] != null) { trueClose = closes[i]; break; } }
@@ -260,8 +264,23 @@ async function fetchHistory(sym, range) {
   const res = await yahooChart(sym, r, iv);
   const ts = res.timestamp || [];
   const q = res.indicators?.quote?.[0] || {};
+  // DUOL after-hours glitch: Yahoo returns stale post-market bars with
+  // volume 0 and a frozen price (e.g. 154.00 at 16:04, 19:19, 19:56, and
+  // even a stray bar after post-market ends at 20:00 ET), plus duplicate
+  // timestamps. The chart plots points by index, so those fake bars stretch
+  // the after-hours tail and make the line jump. Drop them: any bar past
+  // the post-market end, and any zero-volume bar after the 4 PM regular
+  // close (keep the 4 PM close bar itself).
+  const meta = res.meta || {};
+  const regEnd = meta.currentTradingPeriod?.regular?.end ?? null;
+  const postEnd = meta.currentTradingPeriod?.post?.end ?? null;
   const pts = [];
-  for (let i = 0; i < ts.length; i++) { if (q.close?.[i] == null) continue; pts.push({ t: ts[i] * 1000, o: q.open?.[i] ?? q.close[i], h: q.high?.[i] ?? q.close[i], l: q.low?.[i] ?? q.close[i], c: q.close[i], v: q.volume?.[i] ?? 0 }); }
+  for (let i = 0; i < ts.length; i++) {
+    if (q.close?.[i] == null) continue;
+    if (postEnd && ts[i] > postEnd) continue;
+    if (regEnd && ts[i] > regEnd && (q.volume?.[i] ?? 0) === 0) continue;
+    pts.push({ t: ts[i] * 1000, o: q.open?.[i] ?? q.close[i], h: q.high?.[i] ?? q.close[i], l: q.low?.[i] ?? q.close[i], c: q.close[i], v: q.volume?.[i] ?? 0 });
+  }
   const step = Math.max(1, Math.ceil(pts.length / 220));
   const candles = [];
   for (let i = 0; i < pts.length; i += step) { const chunk = pts.slice(i, i + step); candles.push({ t: chunk[0].t, o: chunk[0].o, h: Math.max(...chunk.map(p => p.h)), l: Math.min(...chunk.map(p => p.l)), c: chunk[chunk.length - 1].c }); }
