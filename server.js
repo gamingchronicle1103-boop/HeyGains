@@ -284,6 +284,27 @@ async function fetchHistory(sym, range) {
     pts.push({ t: ts[i] * 1000, o: q.open?.[i] ?? q.close[i], h: q.high?.[i] ?? q.close[i], l: q.low?.[i] ?? q.close[i], c: q.close[i], v: q.volume?.[i] ?? 0 });
   }
   pts.reverse();
+  if (range === '1D' && pts.length) {
+    // DUOL pre/post barely shows: Yahoo only returns 4 premarket bars and
+    // 5 post-market bars for DUOL (vs 330 / 241 for NVDA), so on an
+    // index-based chart those 9 bars get ~3% of the width instead of their
+    // true ~35% of the day. Fill the 1-minute grid by carrying the last
+    // traded price forward (v=0) — no trades means the price didn't move,
+    // so the line goes flat there instead of vanishing. This also makes
+    // the index-based X axis true to time. NVDA is already full, so it
+    // barely changes; DUOL's pre/post now show as real flat stretches.
+    const filled = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const prev = filled[filled.length - 1];
+      const gapMin = Math.round((pts[i].t - prev.t) / 60000);
+      for (let m = 1; m < gapMin; m++) {
+        const t = prev.t + m * 60000;
+        filled.push({ t, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0 });
+      }
+      filled.push(pts[i]);
+    }
+    pts.length = 0; pts.push(...filled);
+  }
   const step = Math.max(1, Math.ceil(pts.length / 220));
   const candles = [];
   for (let i = 0; i < pts.length; i += step) { const chunk = pts.slice(i, i + step); candles.push({ t: chunk[0].t, o: chunk[0].o, h: Math.max(...chunk.map(p => p.h)), l: Math.min(...chunk.map(p => p.l)), c: chunk[chunk.length - 1].c }); }
