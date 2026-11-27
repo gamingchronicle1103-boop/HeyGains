@@ -3,7 +3,7 @@
 // worker fails to install or the cache is unavailable, the app still loads
 // from the network as before — the worker is an enhancement, not a gate.
 'use strict';
-const CACHE = 'heygains-shell-v1';
+const CACHE = 'heygains-shell-v2';
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()).catch(() => {}));

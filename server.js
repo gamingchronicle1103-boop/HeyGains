@@ -549,6 +549,7 @@ function verifyCode(uid, code) {
 }
 
 // ---------- AI ----------
+function aiConfigured() { return !!(process.env.AI_API_URL && (process.env.AI_API_KEY || process.env.AZURE_OPENAI_API_KEY)); }
 async function aiDecide(prompt) {
   const url = process.env.AI_API_URL; const key = process.env.AI_API_KEY || process.env.AZURE_OPENAI_API_KEY;
   if (!url || !key) return null;
@@ -928,8 +929,9 @@ function wipeGame(uid, startCash) {
 
 app.get('/api/health', (req, res) => res.json({ ok: true, app: APP_NAME, session: marketSession(), users: db.prepare('SELECT COUNT(*) c FROM users').get().c }));
 // Public config — no auth needed (the welcome screen is shown before
-// sign-in). Only exposes the Discord invite URL (empty until configured).
-app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL }));
+// sign-in). Only exposes the Discord invite URL (empty until configured)
+// plus two booleans the UI uses for its banners/badges.
+app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured() }));
 app.get('/api/session', (req, res) => res.json({ players: db.prepare("SELECT id, name, is_owner, CASE WHEN pin_hash IS NULL OR pin_hash = '' THEN 0 ELSE 1 END AS has_pin FROM users ORDER BY created_at").all() }));
 
 app.post('/api/auth/register', async (req, res) => {

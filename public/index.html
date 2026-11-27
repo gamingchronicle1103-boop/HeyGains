@@ -19,8 +19,8 @@
   <div class="welcome-card">
     <p class="eyebrow">HeyGains · Stock Trading Simulator</p>
     <h1>REAL PRICES. FAKE MONEY. ALL YOURS TO PLAY.</h1>
-    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Start with $100,000 of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the AI Predictor, get buy/sell pings, and let the auto trader run 24/7. No real money, no real orders.</p>
-    <div class="stat-chips"><span>$100K</span><span>12 default tickers</span><span>24/7</span></div>
+    <p class="tagline">HeyGains is a paper trading simulator created by Lucas Do. Start with $100,000 of fake cash and trade 12 default tickers — and add more of your own stocks and crypto — with real live prices. Ask the Verity AI Predictor, get buy/sell pings, and let the auto trader run 24/7. No real money, no real orders.</p>
+    <div class="stat-chips"><span id="welcome-stat-cash">$100K</span><span>12 default tickers</span><span>24/7</span></div>
     <div class="row">
       <button id="btn-welcome-create" class="btn primary big">CREATE MY ACCOUNT</button>
       <button id="btn-welcome-signin" class="btn big">I ALREADY HAVE ONE</button>
@@ -32,7 +32,7 @@
     <ul class="welcome-list">
       <li><b>REAL PRICES LIVE</b>Live quotes every 10 seconds, including premarket and after-hours vs the 4 PM close.</li>
       <li><b>TRADE IT LIKE IT'S REAL</b>Fractional shares, live extended fills, and your −5% stop / +10% target guardrails.</li>
-      <li><b>AI PREDICTOR</b>Ask about any ticker and get Bullish / Bearish / Neutral / Mixed with confidence.</li>
+      <li><b>VERITY AI PREDICTOR</b>Ask about any ticker and get Bullish / Bearish / Neutral / Mixed with confidence.</li>
       <li><b>BUY/SELL PINGS</b>Dip, momentum, stop and target pings — in the app, by sound, and by email.</li>
       <li><b>AUTO TRADER 24/7</b>Verity AI runs the sim around the clock, with research before every buy.</li>
       <li><b>YOUR OWN GAME</b>Your own account, your own cash, your own picks, your own email.</li>
@@ -89,7 +89,7 @@
       <div class="row"><button id="btn-verify" class="btn primary">VERIFY &amp; START PLAYING</button><button id="btn-resend" class="btn small">RESEND CODE</button><button id="btn-skip-verify" class="btn small">SKIP — VERIFY LATER IN PINGS</button></div>
       <p id="verify-msg" class="muted"></p>
     </div>
-    <p class="muted small">Your PIN is stored hashed — never in plain text. The first account created is the owner account (Lucas).</p>
+    <p class="muted small">Your PIN is stored hashed — never in plain text. The owner account is whoever is named Lucas (exact name match) — not whoever signed up first.</p>
     <p><button id="btn-back-welcome" class="btn small">NEW HERE? SEE WHAT HEYGAINS IS</button></p>
     <p class="footer">Created by Lucas Do</p>
   </div>
@@ -111,9 +111,6 @@
     <button data-goto="trade" id="side-own-picks">Your own stocks &amp; crypto <span id="side-own-count"></span></button>
     <button data-goto="settings">All settings <span>›</span></button>
   </div>
-  <h3>QUICK SETTINGS</h3>
-  <div id="side-quick"></div>
-  <p id="side-saver-note" class="muted small"></p>
   <div class="row">
     <button id="btn-side-ping-rules" class="btn small">PING RULES</button>
     <button id="btn-side-auto-controls" class="btn small">AUTO CONTROLS</button>
@@ -130,8 +127,6 @@
     <h3>THEME COLOR</h3>
     <div id="theme-picker" class="theme-picker"></div>
     <div class="row">
-      <button id="btn-side-what" class="btn small">What is HeyGains?</button>
-      <button id="btn-side-reset" class="btn small danger">Reset my game</button>
       <button id="btn-side-signout" class="btn small">Sign out</button>
     </div>
     <p class="footer">Created by Lucas Do</p>
@@ -152,8 +147,6 @@
   <div class="top-right">
     <span id="user-line"></span>
     <button id="btn-refresh" class="btn small">REFRESH</button>
-    <button id="btn-reset" class="btn small danger">Reset</button>
-    <button id="btn-logout" class="btn small">SIGN OUT</button>
   </div>
 </header>
 
@@ -171,24 +164,6 @@
   <p class="muted small" id="ext-explainer">Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the 4 PM close. When overnight prices are off, your game freezes at the 4 PM close outside market hours instead.</p>
 </div>
 
-<div class="grid scoreboard-extra">
-  <div class="card">
-    <h2>LEADERBOARD</h2>
-    <p class="muted small">All players, ranked by % return — the best return on starting cash wins, not the biggest pile. Updates every minute.</p>
-    <div id="leaderboard-list"><p class="muted">Loading leaderboard…</p></div>
-  </div>
-  <div class="card">
-    <h2>YOUR RANK &amp; ACHIEVEMENTS</h2>
-    <div id="achievements-rank"><p class="muted">Loading achievements…</p></div>
-    <div id="achievements-list"></div>
-  </div>
-</div>
-<div class="card scoreboard-extra">
-  <h2>PORTFOLIO OVER TIME · LAST 7 DAYS</h2>
-  <p class="muted small" id="portfolio-caption">Your net worth, snapshotted every couple of minutes. Grey dashed line = your starting cash.</p>
-  <div class="chart-wrap"><canvas id="portfolio-chart" width="760" height="220"></canvas></div>
-</div>
-
 <div id="banner" class="banner hidden"></div>
 <div id="app-loading" class="loading-box">PULLING LIVE QUOTES…</div>
 <div id="app-error" class="error-box hidden"><p><strong>CAN'T REACH THE GAME</strong></p><p class="muted">The server didn't answer. Check your connection and try again.</p><button id="btn-retry-app" class="btn primary">Retry</button></div>
@@ -199,6 +174,7 @@
   <button data-tab="predictor" class="tab">PREDICTOR</button>
   <button data-tab="pings" class="tab">PINGS <span id="ping-count" class="count hidden"></span></button>
   <button data-tab="chat" class="tab">CHAT</button>
+  <button data-tab="stats" class="tab">STATS</button>
   <button data-tab="settings" class="tab">SETTINGS</button>
 </nav>
 
@@ -264,7 +240,7 @@
   <!-- ===== AUTO ===== -->
   <section id="tab-auto" class="tabpage hidden">
     <div class="card">
-      <h2>AUTO TRADING · VERITY AI RUNS THE SIM</h2>
+      <h2>AUTO TRADING · VERITY AI RUNS THE SIM <span id="auto-ai-badge" class="tag amber hidden">Rules-only mode — no AI key</span></h2>
       <p class="muted">The auto trader watches the board around the clock — even with this page closed — and buys the dips and momentum it finds, then sells at your style's lines.</p>
       <div class="saver-box" id="saver-box">
         <strong>CREDIT SAVER</strong> <span id="saver-state"></span>
@@ -301,7 +277,7 @@
   <!-- ===== PREDICTOR ===== -->
   <section id="tab-predictor" class="tabpage hidden">
     <div class="card">
-      <h2>STOCK PREDICTOR · AI</h2>
+      <h2>STOCK PREDICTOR · VERITY AI <span id="pred-ai-badge" class="tag amber hidden">Rules-only mode — no AI key</span></h2>
       <p class="muted">Ask about a ticker. It reads the live price, recent closes and fresh news, then gives an outlook — Bullish, Bearish, Neutral or Mixed — with confidence, key points and risks.</p>
       <div class="ticker-chips" id="pred-chips"></div>
       <p id="pred-current" class="muted"></p>
@@ -336,6 +312,7 @@
       <div class="stepper-row"><label>MOMENTUM PING AT</label><span class="stepper"><button data-stepper="momentumPct" data-dir="-1">−</button><span id="step-momentumPct">+4%</span><button data-stepper="momentumPct" data-dir="1">+</button></span><span class="muted small">1–15%</span></div>
       <div class="row"><button id="btn-notify" class="btn small">Enable browser notifications</button><span id="notify-state" class="muted small"></span></div>
       <h3>EMAIL NOTIFICATIONS</h3>
+      <p id="email-not-configured" class="banner warn hidden">Email is not set up on this server yet — pings and auto-trade emails won't send until the owner adds SMTP.</p>
       <label>Your email <input id="notify-email" type="email" placeholder="you@example.com"></label>
       <p id="email-status" class="muted small"></p>
       <div class="row"><button id="btn-send-code" class="btn primary">SEND CODE</button><button id="btn-clear-email" class="btn small">CLEAR EMAIL</button></div>
@@ -366,19 +343,35 @@
     </div>
   </section>
 
+  <!-- ===== STATS ===== -->
+  <section id="tab-stats" class="tabpage hidden">
+    <div class="grid">
+      <div class="card">
+        <h2>LEADERBOARD</h2>
+        <p class="muted small">All players, ranked by % return — the best return on starting cash wins, not the biggest pile. Updates every minute.</p>
+        <div id="leaderboard-list"><p class="muted">Loading leaderboard…</p></div>
+      </div>
+      <div class="card">
+        <h2>YOUR RANK &amp; ACHIEVEMENTS</h2>
+        <div id="achievements-rank"><p class="muted">Loading achievements…</p></div>
+        <div id="achievements-list"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>PORTFOLIO OVER TIME · LAST 7 DAYS</h2>
+      <p class="muted small" id="portfolio-caption">Your net worth, snapshotted every couple of minutes. Grey dashed line = your starting cash.</p>
+      <div class="chart-wrap"><canvas id="portfolio-chart" width="760" height="220"></canvas></div>
+    </div>
+  </section>
+
   <!-- ===== SETTINGS ===== -->
   <section id="tab-settings" class="tabpage hidden">
     <div class="card"><h3>PROFILE</h3><div id="settings-profile"></div>
       <p id="settings-best-run" class="muted small"></p>
-      <h3>EMAIL PREFERENCES</h3>
-      <label>Your email <input id="set-email" type="email" placeholder="you@example.com"></label>
-      <p id="set-email-status" class="muted small"></p>
-      <div class="row"><button id="btn-set-send-code" class="btn primary">SEND CODE</button><button id="btn-set-clear-email" class="btn small">CLEAR EMAIL</button></div>
-      <div id="set-verify-block" class="verify-block hidden"><input id="set-verify-code" placeholder="6-digit code" inputmode="numeric" maxlength="6"><div class="row"><button id="btn-set-verify" class="btn primary">VERIFY</button></div></div>
-      <label class="switch"><input type="checkbox" id="set-email-pings" checked> Email me pings</label>
-      <label class="switch"><input type="checkbox" id="set-email-trades" checked> Email me auto trades</label>
-      <div class="row"><button id="btn-set-test-email" class="btn small">SEND A TEST EMAIL</button></div>
-      <p id="set-email-msg" class="muted"></p>
+      <p id="set-email-not-configured" class="banner warn hidden">Email is not set up on this server yet — pings and auto-trade emails won't send until the owner adds SMTP.</p>
+      <h3>EMAIL</h3>
+      <p class="muted small">Email addresses, verification codes, test emails and email toggles all live in the PINGS tab now — one place for everything email.</p>
+      <div class="row"><button id="btn-set-goto-pings" class="btn small">MANAGE EMAIL IN PINGS →</button></div>
     </div>
     <div class="card"><h3>STARTING CASH</h3>
       <p class="muted small">Pick how much fake cash a fresh game starts with ($100–$10,000,000). Applying it restarts your game fresh at that amount.</p>
@@ -393,42 +386,9 @@
       <label class="switch"><input type="checkbox" id="set-live-refresh" checked> Live prices</label>
       <label class="switch"><input type="checkbox" id="set-overnight" checked> Overnight &amp; after-hours prices</label>
     </div>
-    <div class="card"><h3>PING RULES</h3>
-      <label class="switch"><input type="checkbox" id="set-pings-on"> Pings ON/OFF</label>
-      <label class="switch"><input type="checkbox" id="set-buy-pings" checked> BUY pings</label>
-      <label class="switch"><input type="checkbox" id="set-sell-pings" checked> SELL pings</label>
-      <label class="switch"><input type="checkbox" id="set-stop-target-pings" checked> Stop/Target pings</label>
-      <label class="switch"><input type="checkbox" id="set-sound" checked> Ping sound</label>
-      <div class="stepper-row"><label>DIP PING AT</label><span class="stepper"><button data-stepper="dipPct" data-dir="-1">−</button><span id="step-set-dipPct">−3%</span><button data-stepper="dipPct" data-dir="1">+</button></span></div>
-      <div class="stepper-row"><label>MOMENTUM PING AT</label><span class="stepper"><button data-stepper="momentumPct" data-dir="-1">−</button><span id="step-set-momentumPct">+4%</span><button data-stepper="momentumPct" data-dir="1">+</button></span></div>
-      <div class="row"><button id="btn-set-notify" class="btn small">Enable browser notifications</button></div>
-    </div>
-    <div class="card"><h3>AUTO TRADER</h3>
-      <div class="saver-box">
-        <strong>CREDIT SAVER</strong> <span id="set-saver-state"></span>
-        <p class="muted small" style="margin:6px 0 0">Credit Saver bundle: 30-second rules checks, the decider only runs when a real signal fires (strongest one only), market hours only (9:30 AM–4:00 PM ET), max 2 trades/day. For players it is always on — only the owner (Lucas) can turn it off.</p>
-        <label class="switch"><input type="checkbox" id="set-credit-saver" checked> Credit Saver ON</label>
-      </div>
-      <h3>TRADING STYLE</h3>
-      <div class="style-grid" id="set-style-grid">
-        <button type="button" class="style-card" data-style="scalping"><b>SCALPING</b><span>Minutes–hours · −2% / +3%</span></button>
-        <button type="button" class="style-card" data-style="day"><b>DAY TRADING</b><span>Same day–2 days · −5% / +10%</span></button>
-        <button type="button" class="style-card" data-style="swing"><b>SWING</b><span>Days–weeks · −8% / +20%</span></button>
-        <button type="button" class="style-card" data-style="position"><b>POSITION</b><span>Weeks–months · −12% / +30%</span></button>
-      </div>
-      <label class="switch"><input type="checkbox" id="set-auto-on"> Auto trading ON/OFF</label>
-      <label class="switch"><input type="checkbox" id="set-auto-sell" checked> Auto-sell at style's lines</label>
-      <label class="switch"><input type="checkbox" id="set-auto-buy-dips" checked> Buy the dips</label>
-      <label class="switch"><input type="checkbox" id="set-auto-buy-momentum" checked> Buy momentum</label>
-      <h3>WHO PICKS THE BUYS</h3>
-      <div class="picker-row" id="set-mode-picker"><button type="button" class="btn" data-mode="ai">VERITY AI</button><button type="button" class="btn" data-mode="rules">RULES ONLY</button></div>
-      <div class="stepper-row"><label>BUDGET PER BUY</label><span class="stepper"><button data-stepper="budgetPerBuy" data-dir="-1">−</button><span id="step-set-budgetPerBuy">$10,000</span><button data-stepper="budgetPerBuy" data-dir="1">+</button></span></div>
-      <div class="stepper-row"><label>MAX POSITIONS</label><span class="stepper"><button data-stepper="maxPositions" data-dir="-1">−</button><span id="step-set-maxPositions">10</span><button data-stepper="maxPositions" data-dir="1">+</button></span></div>
-      <div class="stepper-row"><label>MAX TRADES/DAY</label><span class="stepper"><button data-stepper="maxTradesPerDay" data-dir="-1">−</button><span id="step-set-maxTradesPerDay">5</span><button data-stepper="maxTradesPerDay" data-dir="1">+</button></span></div>
-      <div class="stepper-row"><label>CHECK EVERY</label><span class="stepper"><button data-stepper="checkSeconds" data-dir="-1">−</button><span id="step-set-checkSeconds">30s</span><button data-stepper="checkSeconds" data-dir="1">+</button></span></div>
-      <h3>STATUS</h3>
-      <div class="status-box" id="set-auto-status">AUTO OFF</div>
-      <div class="row"><button id="btn-set-run-now" class="btn primary">RUN A CHECK NOW</button></div>
+    <div class="card"><h3>PINGS &amp; AUTO TRADER</h3>
+      <p class="muted small">Ping rules live in the PINGS tab, and the auto trader lives in the AUTO tab — every switch lives in exactly one place now.</p>
+      <div class="row"><button id="btn-set-goto-pings2" class="btn small">PINGS →</button><button id="btn-set-goto-auto" class="btn small">AUTO TRADER →</button></div>
     </div>
     <div class="card"><h3>FEEDBACK</h3>
       <div id="feedback-inbox"></div>
@@ -438,7 +398,7 @@
     </div>
     <div class="card"><h3>ABOUT &amp; DANGER ZONE</h3>
       <p class="muted small">What is HeyGains? HeyGains is a paper trading simulator created by Lucas Do — real live prices, fake money, no real orders. Start with $100,000 of fake cash (or pick your own starting amount), trade 12 tickers plus your own stocks and crypto, get pings and Predictor answers, and let the auto trader run 24/7.</p>
-      <div class="row"><button id="btn-show-welcome" class="btn small">What is HeyGains?</button><button id="btn-reset2" class="btn small danger">Reset my game</button><button id="btn-signout2" class="btn small">Sign out</button></div>
+      <div class="row"><button id="btn-reset2" class="btn small danger">Reset my game</button></div>
       <h3>Delete account</h3>
       <div id="delete-row"></div>
       <p class="footer">Created by Lucas Do</p>
@@ -450,14 +410,14 @@
   <p><strong>THE GAME</strong></p>
   <p>HeyGains starts you with $100,000 of fake cash (or pick your own starting amount) and real live quotes for 12 tickers plus your own stocks and crypto, refreshing every 10 seconds. Trading never closes — you can buy and sell in any session, at the live extended price, never the close. The guardrails are −5% stop / +10% target, the Predictor answers your questions, buy/sell pings watch your lines, and the Auto Trader can run the whole thing 24/7. Paper trading only — no real money, no real orders.</p>
   <p id="footer-best-run" class="muted"></p>
-  <div class="row" style="justify-content:center"><button id="btn-footer-what" class="btn small">What is HeyGains?</button><button id="btn-footer-reset" class="btn small danger">Reset game</button></div>
+  <div class="row" style="justify-content:center"><button id="btn-footer-what" class="btn small">What is HeyGains?</button></div>
   <p>Created by Lucas Do</p>
 </footer>
 </div><!-- /app -->
 
 <div id="reset-modal" class="modal hidden"><div class="modal-card"><h2>RESET EVERYTHING?</h2><p>This wipes: your cash back to your starting amount, all positions, buy/sell history, Predictor history, pings and your best run. Other players keep their own games, and your ping settings stay.</p><div class="row"><button id="btn-confirm-reset" class="btn danger">Yes, reset everything</button><button id="btn-cancel-reset" class="btn">Cancel</button></div></div></div>
 <div id="startcash-modal" class="modal hidden"><div class="modal-card"><h2 id="startcash-modal-title">START OVER AT $100,000?</h2><p>This wipes: your cash, all positions, buy/sell history, Predictor history, pings and your best run — and restarts your game at the new amount. Your board, settings, email and theme stay.</p><div class="row"><button id="btn-confirm-startcash" class="btn danger">Yes, start over</button><button id="btn-cancel-startcash" class="btn">Cancel</button></div></div></div>
-<div id="delete-modal" class="modal hidden"><div class="modal-card"><h2>DELETE YOUR ACCOUNT?</h2><p>This permanently deletes your account, positions, trades, settings, pings and Predictor history. You will disappear from the sign-in page. This cannot be undone.</p><input id="delete-pin" type="password" placeholder="Enter your PIN to confirm" inputmode="numeric"><div class="row"><button id="btn-confirm-delete" class="btn danger">Yes, delete my account</button><button id="btn-cancel-delete" class="btn">Cancel</button></div><p id="delete-msg" class="error"></p></div></div>
+<div id="delete-modal" class="modal hidden"><div class="modal-card"><h2>DELETE YOUR ACCOUNT?</h2><p>This permanently deletes your account, positions, trades, settings, pings and Predictor history. You will disappear from the sign-in page. This cannot be undone.</p><input id="delete-pin" type="password" placeholder="Enter your PIN to confirm"><div class="row"><button id="btn-confirm-delete" class="btn danger">Yes, delete my account</button><button id="btn-cancel-delete" class="btn">Cancel</button></div><p id="delete-msg" class="error"></p></div></div>
 
 <script src="app.js"></script>
 </body>

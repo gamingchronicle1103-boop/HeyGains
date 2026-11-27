@@ -38,6 +38,24 @@ function removeDeviceAccount(name) {
 }
 let leaderboardData = null, portfolioHistory = null, achievementsData = null, predictorTrackRecord = null, lastExtrasLoad = 0;
 let chatMessages = [], chatFilter = 'ALL', chatTimer = null;
+// Server capability flags from /api/config (null = not loaded yet):
+// smtpConfigured false => show the email-not-configured banner;
+// aiConfigured false => show the "Rules-only mode — no AI key" badge.
+let serverConfig = { smtpConfigured: null, aiConfigured: null };
+let lastThemeRendered = null, lastSymbolKey = null;
+// Write into a text input only when the player is NOT typing in it —
+// the 10-second refresh used to overwrite emails / starting cash mid-type.
+function setInputValue(id, value) {
+  const el = $(id); if (!el) return;
+  if (document.activeElement === el) return;
+  if (el.value !== String(value ?? '')) el.value = value ?? '';
+}
+function fmtCashShort(v) {
+  v = Number(v || 0);
+  if (v >= 1000000) return '$' + (v / 1000000).toLocaleString('en-US', { maximumFractionDigits: 2 }) + 'M';
+  if (v >= 1000) return '$' + (v / 1000).toLocaleString('en-US', { maximumFractionDigits: 2 }) + 'K';
+  return money(v);
+}
 // Escape ALL user/server-controlled text before innerHTML injection.
 // Use for names, messages, predictor text, news, symbols, emails, etc.
 // App-generated HTML (chips/buttons) is built from literal templates, not from this.
@@ -58,6 +76,10 @@ function applyTheme(name) {
 }
 function renderThemePickers() {
   const cur = localStorage.getItem('verityinvest-theme') || 'terminal';
+  // Skip the rebuild when nothing changed — loadState runs every 10 s and
+  // rebuilding the pickers that often is wasteful (and can drop focus).
+  if (lastThemeRendered === cur && document.querySelectorAll('.theme-dot').length) return;
+  lastThemeRendered = cur;
   for (const id of ['theme-picker', 'set-theme-picker']) {
     const el = $(id); if (!el) continue; el.innerHTML = '';
     for (const [name, color] of Object.entries(THEMES)) {
@@ -172,7 +194,8 @@ async function loadState() {
     : 'Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the 4 PM close. When overnight prices are off, your game freezes at the 4 PM close outside market hours instead.';
   $('trade-session-banner').textContent = 'Session: ' + sessionDisplay(state.session) + ' — trading never closes. You fill at the LIVE extended price, never the close.';
   $('footer-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : '';
-  renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState();
+  renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges();
+  const wc = $('welcome-stat-cash'); if (wc) wc.textContent = fmtCashShort(state.settings.startCash || 100000);
   const unread = state.alerts.filter(a => !a.read).length;
   $('ping-count').textContent = unread; $('ping-count').classList.toggle('hidden', !unread);
   loadExtras(false); // leaderboard / portfolio history / achievements, throttled to 60 s
@@ -184,6 +207,12 @@ async function loadState() {
   $('side-own-count').textContent = (state.customSymbols || []).length + ' added';
 }
 function fillSymbolSelects() {
+  // Skip the rebuild when the symbol list hasn't changed — loadState runs
+  // every 10 s and rebuilding both selects that often can drop an open
+  // dropdown. The key covers the symbols and the current chart symbol.
+  const key = allSymbols().join(',') + '|' + chartSymbol;
+  if (key === lastSymbolKey) { renderPredChips(); return; }
+  lastSymbolKey = key;
   const cur = $('trade-symbol').value || chartSymbol;
   $('trade-symbol').innerHTML = '';
   for (const t of allSymbols()) { const o = document.createElement('option'); o.value = t; o.textContent = t + (CORE.includes(t) ? '' : ' ★'); $('trade-symbol').appendChild(o); }
@@ -226,14 +255,15 @@ async function loadQuotes() {
 }
 function renderTickerTape() {
   const track = $('ticker-track'); if (!track) return;
-  const items = CORE.map(sym => {
+  // Core tickers first, then the player's own picks (state.customSymbols).
+  const items = allSymbols().map(sym => {
     const q = quotes[sym];
     const price = q ? money(q.price) : '—';
     const chg = q ? pct(q.changePct) : '';
     const cls = q ? (q.changePct >= 0 ? 'up' : 'down') : '';
     return `<span class="tape-item"><b>${escapeHtml(sym)}</b> ${escapeHtml(price)} <span class="${cls}">${escapeHtml(chg)}</span></span>`;
   }).join('<span class="tape-sep">·</span>');
-  // Two copies for a seamless loop; content is CORE symbols + numbers only.
+  // Two copies for a seamless loop; content is symbols + numbers only.
   track.innerHTML = items + '<span class="tape-sep">·</span>' + items;
 }
 async function loadExtras(force) {
@@ -687,7 +717,7 @@ async function placeOrder() {
 // ---------- Positions / trades / movers / news ----------
 function renderPositions() {
   const el = $('positions');
-  if (!state.positions.length) { el.innerHTML = '<p class="muted">No positions yet.</p>'; return; }
+  if (!state.positions.length) { el.innerHTML = '<p class="muted">No positions yet — pick a ticker above and buy your first share →</p>'; return; }
   const style = STYLES[state.settings.style] || STYLES.day;
   el.innerHTML = state.positions.map(p => {
     const mv = p.price * p.shares;
@@ -708,7 +738,7 @@ function renderPositions() {
 }
 function renderTrades() {
   const el = $('trades');
-  if (!state.trades.length) { el.innerHTML = '<p class="muted">No trades yet.</p>'; return; }
+  if (!state.trades.length) { el.innerHTML = '<p class="muted">No trades yet — your first buy will show here.</p>'; return; }
   el.innerHTML = state.trades.map(t => {
     const src = String(t.source || '');
     const kindTag = src.endsWith('-short') ? ' <span class="tag red">SHORT</span>' : src.endsWith('-cover') ? ' <span class="tag amber">COVER</span>' : '';
@@ -748,7 +778,7 @@ function renderAlerts() {
   el.innerHTML = state.alerts.length ? state.alerts.map(a => {
     const q = quotes[a.symbol];
     return `<div class="ping-row">${pingKindChip(a.kind)} <strong>${escapeHtml(a.symbol)}</strong>${a.read ? '' : '<span class="new-badge">NEW</span>'}<br>${escapeHtml(a.message)}<br><span class="muted small">${money(a.price)} · ${q ? pct(q.changePct) + ' today' : ''} · ${fmtDT(a.created_at)}</span> <button class="btn small" data-ping-open="${escapeHtml(a.symbol)}">Open ${escapeHtml(a.symbol)} →</button></div>`;
-  }).join('') : '<p class="muted">No pings yet.</p>';
+  }).join('') : '<p class="muted">No pings yet — set a dip or momentum ping above.</p>';
   el.querySelectorAll('[data-ping-open]').forEach(b => b.onclick = () => { chartSymbol = b.dataset.pingOpen; $('trade-symbol').value = chartSymbol; gotoTab('trade'); loadChart(); renderWatchlist(); });
   // Ping banner: newest unread ping, with VIEW + Dismiss; sound + browser notification once.
   const fresh = state.alerts.filter(a => !notifiedIds.has(a.id));
@@ -770,19 +800,16 @@ function updatePingUI() {
   if (!state) return; const s = state.settings;
   $('pings-on').checked = s.pingsOn; $('buy-pings').checked = s.buyPings !== false; $('sell-pings').checked = s.sellPings !== false;
   $('stop-target-pings').checked = s.stopTargetPings !== false; $('sound-on').checked = s.soundOn !== false;
-  $('notify-email').value = state.user.email || state.user.pendingEmail || '';
+  // Focus-guarded: the 10-second refresh must not overwrite an email the
+  // player is in the middle of typing.
+  setInputValue('notify-email', state.user.email || state.user.pendingEmail || '');
   $('email-status').textContent = state.user.emailVerified ? 'VERIFIED ✓ ' + state.user.email : (state.user.pendingEmail ? 'SAVED — pending verification: ' + state.user.pendingEmail + ' — enter the code below.' : 'No email saved — send yourself a code to turn on email pings.');
-  const codeBtn = $('btn-send-code'), setCodeBtn = $('btn-set-send-code');
+  const codeBtn = $('btn-send-code');
   const codeLabel = state.user.emailVerified ? 'VERIFIED ✓' : state.user.pendingEmail ? 'SAVED' : 'SEND CODE';
   if (codeBtn) codeBtn.textContent = codeLabel;
-  if (setCodeBtn) setCodeBtn.textContent = codeLabel;
   $('email-verify-block').classList.toggle('hidden', !(state.user.pendingEmail && !state.user.emailVerified));
   $('email-pings').checked = s.emailPings; $('email-trades').checked = s.emailTrades;
   $('email-queued').textContent = state.emailQueued ? state.emailQueued + ' email(s) queued — they send batched (max 20 per email).' : 'No emails queued.';
-  $('set-email').value = state.user.email || state.user.pendingEmail || '';
-  $('set-email-status').textContent = $('email-status').textContent;
-  $('set-email-pings').checked = s.emailPings; $('set-email-trades').checked = s.emailTrades;
-  $('set-verify-block').classList.toggle('hidden', !(state.user.pendingEmail && !state.user.emailVerified));
 }
 function updateNotifyState() {
   const p = ('Notification' in window) ? Notification.permission : 'unsupported';
@@ -806,16 +833,31 @@ function renderPredHistory() {
     let kp = [], risks = [];
     try { kp = JSON.parse(c.key_points || '[]'); } catch {}
     try { risks = JSON.parse(c.risks || '[]'); } catch {}
+    const answer = c.answer || '';
+    // Long answers: show the first 900 chars with a "Read more" toggle
+    // instead of a hard cut — the full answer is right there behind it.
+    const long = answer.length > 900;
+    const ansHtml = long
+      ? `<p class="pred-answer-short">${escapeHtml(answer.slice(0, 900))}…</p><p class="pred-answer-full hidden">${escapeHtml(answer)}</p><p><button class="btn small" data-readmore>Read more</button></p>`
+      : `<p>${escapeHtml(answer)}</p>`;
     return `<div class="pred-card">
       <p><span class="chip ${c.outlook === 'Bullish' ? 'buy' : c.outlook === 'Bearish' ? 'sell' : 'check'}">${escapeHtml(c.outlook)}</span> <strong>${escapeHtml(c.symbol)}</strong> · ${escapeHtml(c.timeframe || '')} · price at ask ${money(c.price_at_ask || 0)} · ${fmtDT(c.created_at)}</p>
       <p class="muted">“${escapeHtml(c.question)}”</p>
-      <p>${escapeHtml((c.answer || '').slice(0, 900))}</p>
+      ${ansHtml}
       <p>CONFIDENCE ${Number(c.confidence) || 0}%</p><div class="conf-bar"><i style="width:${Number(c.confidence) || 0}%"></i></div>
       ${kp.length ? '<p><strong>Key points</strong></p><ul>' + kp.map(k => `<li>${escapeHtml(k)}</li>`).join('') + '</ul>' : ''}
       ${risks.length ? `<p class="muted small">Risks: ${escapeHtml(risks.join('; '))}</p>` : ''}
       <div class="row"><button class="btn small" data-trade-sym="${escapeHtml(c.symbol)}">Trade ${escapeHtml(c.symbol)} →</button></div>
     </div>`;
   }).join('');
+  el.querySelectorAll('[data-readmore]').forEach(b => b.onclick = () => {
+    const card = b.closest('.pred-card'); if (!card) return;
+    const short = card.querySelector('.pred-answer-short'), full = card.querySelector('.pred-answer-full');
+    if (!short || !full) return;
+    const showingFull = full.classList.toggle('hidden');
+    short.classList.toggle('hidden', !showingFull);
+    b.textContent = showingFull ? 'Read more' : 'Show less';
+  });
   el.querySelectorAll('[data-trade-sym]').forEach(b => b.onclick = () => { chartSymbol = b.dataset.tradeSym; $('trade-symbol').value = chartSymbol; gotoTab('trade'); loadChart(); renderWatchlist(); });
 }
 async function askPredictor() {
@@ -844,36 +886,35 @@ function stepperValue(key, dir) {
 function updateSteppers() {
   if (!state) return; const s = state.settings;
   const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
-  set('step-budgetPerBuy', money(s.budgetPerBuy)); set('step-set-budgetPerBuy', money(s.budgetPerBuy));
-  set('step-maxPositions', s.maxPositions); set('step-set-maxPositions', s.maxPositions);
-  set('step-maxTradesPerDay', s.maxTradesPerDay); set('step-set-maxTradesPerDay', s.maxTradesPerDay);
-  set('step-checkSeconds', fmtCheck(s.checkSeconds)); set('step-set-checkSeconds', fmtCheck(s.checkSeconds));
-  set('step-dipPct', (s.dipPct || -3) + '%'); set('step-set-dipPct', (s.dipPct || -3) + '%');
-  set('step-momentumPct', '+' + (s.momentumPct || 4) + '%'); set('step-set-momentumPct', '+' + (s.momentumPct || 4) + '%');
+  set('step-budgetPerBuy', money(s.budgetPerBuy));
+  set('step-maxPositions', s.maxPositions);
+  set('step-maxTradesPerDay', s.maxTradesPerDay);
+  set('step-checkSeconds', fmtCheck(s.checkSeconds));
+  set('step-dipPct', (s.dipPct || -3) + '%');
+  set('step-momentumPct', '+' + (s.momentumPct || 4) + '%');
   // Steppers locked under Credit Saver (any user while it is on)
   const locked = !!s.creditSaver;
   document.querySelectorAll('[data-stepper="maxTradesPerDay"], [data-stepper="checkSeconds"]').forEach(b => b.disabled = locked);
 }
 function updateAutoUI() {
   if (!state) return; const s = state.settings; const style = STYLES[s.style] || STYLES.day;
-  $('auto-on').checked = s.autoOn; $('set-auto-on').checked = s.autoOn;
-  $('auto-sell').checked = s.autoSell !== false; $('set-auto-sell').checked = s.autoSell !== false;
-  $('auto-buy-dips').checked = s.buyDips !== false; $('set-auto-buy-dips').checked = s.buyDips !== false;
-  $('auto-buy-momentum').checked = s.buyMomentum !== false; $('set-auto-buy-momentum').checked = s.buyMomentum !== false;
-  document.querySelectorAll('#style-grid .style-card, #set-style-grid .style-card').forEach(c => c.classList.toggle('active', c.dataset.style === s.style));
-  document.querySelectorAll('#mode-picker .btn, #set-mode-picker .btn').forEach(c => c.classList.toggle('active', c.dataset.mode === s.autoMode));
-  $('credit-saver').checked = s.creditSaver; $('set-credit-saver').checked = s.creditSaver;
+  $('auto-on').checked = s.autoOn;
+  $('auto-sell').checked = s.autoSell !== false;
+  $('auto-buy-dips').checked = s.buyDips !== false;
+  $('auto-buy-momentum').checked = s.buyMomentum !== false;
+  document.querySelectorAll('#style-grid .style-card').forEach(c => c.classList.toggle('active', c.dataset.style === s.style));
+  document.querySelectorAll('#mode-picker .btn').forEach(c => c.classList.toggle('active', c.dataset.mode === s.autoMode));
+  $('credit-saver').checked = s.creditSaver;
   const saverLocked = !state.user.isOwner;
-  $('credit-saver').disabled = saverLocked; $('set-credit-saver').disabled = saverLocked;
+  $('credit-saver').disabled = saverLocked;
   $('saver-state').textContent = s.creditSaver ? 'ON' : 'OFF';
-  $('set-saver-state').textContent = s.creditSaver ? 'ON' : 'OFF';
-  $('saver-note').textContent = saverLocked ? 'Credit Saver is forced ON for your account (players only). Only Lucas (owner) can turn it off. AI / Rules choice stays yours.' : (s.creditSaver ? 'Credit Saver is ON — 30s checks, AI only on a signal, market hours only, max 2 trades/day.' : 'Credit Saver is OFF (owner only) — your steppers and trade caps are unlocked.');
-  $('side-saver-note').textContent = $('saver-note').textContent;
+  $('saver-note').textContent = saverLocked ? 'Credit Saver is forced ON for your account (players only). Only Lucas (owner) can turn it off. Verity AI / Rules choice stays yours.' : (s.creditSaver ? 'Credit Saver is ON — 30s checks, Verity AI only on a signal, market hours only, max 2 trades/day.' : 'Credit Saver is OFF (owner only) — your steppers and trade caps are unlocked.');
   const last = state.autoLog[0];
   const today = new Date().toISOString().slice(0, 10);
   const tradesToday = state.trades.filter(t => (t.source || '').startsWith('auto') && new Date(t.created_at).toISOString().slice(0, 10) === today).length;
-  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${escapeHtml(s.autoMode)}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
-  $('auto-status').innerHTML = statusHtml; $('set-auto-status').innerHTML = statusHtml;
+  const modeLabel = s.autoMode === 'ai' ? 'Verity AI' : 'Rules only';
+  const statusHtml = `Last action: <b>${last ? escapeHtml(last.kind) + ' — ' + escapeHtml(last.message) : 'none yet'}</b><br>Style: <b>${escapeHtml(s.style)}</b> · lines ${style.stop}% / +${style.target}% · mode ${modeLabel}<br>Credit Saver: <b>${s.creditSaver ? 'ON' : 'OFF'}</b>${saverLocked ? ' (forced for players)' : ''}<br>Last check: <b>${last ? fmtDT(last.created_at) : 'never'}</b><br>Trades used today: <b>${tradesToday} / ${s.maxTradesPerDay}</b> · Positions open: <b>${state.positions.length} / ${s.maxPositions}</b><br>Cash: <b>${money(state.cash)}</b><br>Email: auto-trade emails ${s.emailTrades ? 'ON' : 'OFF'} to ${state.user.emailVerified ? escapeHtml(state.user.email) : 'a verified email (verify in Pings first)'}`;
+  $('auto-status').innerHTML = statusHtml;
 }
 function renderAutoLog() {
   const el = $('auto-log');
@@ -890,12 +931,11 @@ function renderSettings() {
   const init = (state.user.name || '?')[0].toUpperCase();
   $('settings-profile').innerHTML = `<span class="avatar" style="width:44px;height:44px;border-radius:50%;background:var(--accent);color:#06090a;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:18px">${escapeHtml(init)}</span> <strong>${escapeHtml(state.user.name)}</strong> ${state.user.isOwner ? '<span class="tag green">OWNER</span>' : '<span class="tag">PLAYER</span>'}<div class="stat-grid"><div class="stat"><div class="stat-label">Net Worth</div><div class="stat-val">${money(state.netWorth)}</div></div><div class="stat"><div class="stat-label">Cash</div><div class="stat-val">${money(state.cash)}</div></div><div class="stat"><div class="stat-label">All-time</div><div class="stat-val">${money(state.allTime)}</div></div><div class="stat"><div class="stat-label">Positions</div><div class="stat-val">${state.positions.length}</div></div></div>`;
   $('settings-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : 'BEST BANKED RUN: — none banked yet';
-  $('start-cash').value = s.startCash || 100000;
-  $('btn-apply-startcash').textContent = 'RESTART MY GAME AT ' + money(s.startCash || 100000);
+  // Focus-guarded: the 10-second refresh must not overwrite a starting
+  // cash amount the player is in the middle of typing.
+  setInputValue('start-cash', s.startCash || 100000);
+  if (document.activeElement !== $('start-cash')) $('btn-apply-startcash').textContent = 'RESTART MY GAME AT ' + money(s.startCash || 100000);
   $('set-live-refresh').checked = s.liveRefresh !== false; $('set-overnight').checked = s.overnightPrices !== false;
-  $('set-sound').checked = s.soundOn !== false;
-  $('set-pings-on').checked = s.pingsOn; $('set-buy-pings').checked = s.buyPings !== false; $('set-sell-pings').checked = s.sellPings !== false;
-  $('set-stop-target-pings').checked = s.stopTargetPings !== false;
   renderThemePickers();
 }
 function renderSidebarProfile() {
@@ -903,19 +943,6 @@ function renderSidebarProfile() {
   const init = (state.user.name || '?')[0].toUpperCase();
   el.innerHTML = `<span class="avatar">${escapeHtml(init)}</span><span class="prof-name">${escapeHtml(state.user.name)}</span> ${state.user.isOwner ? '<span class="tag green">OWNER</span>' : '<span class="tag">PLAYER</span>'}<div class="stat-grid"><div class="stat"><div class="stat-label">Net worth</div><div class="stat-val">${money(state.netWorth)}</div></div><div class="stat"><div class="stat-label">Cash</div><div class="stat-val">${money(state.cash)}</div></div><div class="stat"><div class="stat-label">All-time</div><div class="stat-val">${money(state.allTime)}</div></div><div class="stat"><div class="stat-label">Positions</div><div class="stat-val">${state.positions.length}</div></div></div><p class="muted small">BEST BANKED RUN: ${state.bestRun > 0 ? money(state.bestRun) : '— none yet'}</p><p class="muted small">Email: ${state.user.emailVerified ? 'VERIFIED ✓ ' + escapeHtml(state.user.email) : state.user.pendingEmail ? 'Pending: ' + escapeHtml(state.user.pendingEmail) : 'Not set up'} — <a href="#" id="side-email-link">${state.user.emailVerified ? 'Change my email' : state.user.pendingEmail ? 'Verify my email' : 'Set up my email'}</a></p>`;
   const link = $('side-email-link'); if (link) link.onclick = e => { e.preventDefault(); gotoTab('pings'); };
-  const q = $('side-quick'); if (q) {
-    const st = state.settings;
-    q.innerHTML = `
-      <label class="switch"><input type="checkbox" id="sq-live" ${st.liveRefresh !== false ? 'checked' : ''}> Live prices</label>
-      <label class="switch"><input type="checkbox" id="sq-overnight" ${st.overnightPrices !== false ? 'checked' : ''}> Overnight &amp; after-hours prices</label>
-      <label class="switch"><input type="checkbox" id="sq-pings" ${st.pingsOn ? 'checked' : ''}> Pings</label>
-      <label class="switch"><input type="checkbox" id="sq-sound" ${st.soundOn !== false ? 'checked' : ''}> Ping sound</label>
-      <label class="switch"><input type="checkbox" id="sq-email-pings" ${st.emailPings ? 'checked' : ''}> Email me pings</label>
-      <label class="switch"><input type="checkbox" id="sq-email-trades" ${st.emailTrades ? 'checked' : ''}> Email me auto trades</label>
-      <label class="switch"><input type="checkbox" id="sq-auto" ${st.autoOn ? 'checked' : ''}> Auto trader</label>`;
-    const bind = (id, key) => { const n = $(id); if (n) n.onchange = () => saveSettings({ [key]: n.checked }); };
-    bind('sq-live', 'liveRefresh'); bind('sq-overnight', 'overnightPrices'); bind('sq-pings', 'pingsOn'); bind('sq-sound', 'soundOn'); bind('sq-email-pings', 'emailPings'); bind('sq-email-trades', 'emailTrades'); bind('sq-auto', 'autoOn');
-  }
 }
 function renderFeedbackInbox() {
   const render = (el, withClear) => {
@@ -948,6 +975,7 @@ function gotoTab(name) {
   $('tab-' + name).classList.remove('hidden'); closeSidebar();
   if (name === 'trade' && Date.now() - lastNewsLoad > 60000) loadNews();
   if (name === 'chat') { renderChatFilters(); loadChat(); }
+  if (name === 'stats') drawPortfolioChart(); // canvas was hidden — redraw at real width
 }
 function showWelcome() { $('welcome-screen').classList.remove('hidden'); $('auth-screen').classList.add('hidden'); if (token) loadExtras(true); }
 function showAuth(mode) {
@@ -989,7 +1017,7 @@ $('btn-welcome-create2').onclick = () => { localStorage.setItem('verityinvest-we
 $('btn-welcome-signin').onclick = () => { localStorage.setItem('verityinvest-welcomed', '1'); showAuth('signin'); };
 $('btn-welcome-signin2').onclick = () => { localStorage.setItem('verityinvest-welcomed', '1'); showAuth('signin'); };
 $('btn-back-welcome').onclick = showWelcome;
-$('btn-show-welcome').onclick = showWelcome; $('btn-footer-what').onclick = showWelcome; $('btn-side-what').onclick = showWelcome;
+$('btn-footer-what').onclick = showWelcome;
 // Auth mode toggle
 $('auth-mode-signin').onclick = () => showAuth('signin');
 $('auth-mode-new').onclick = () => showAuth('new');
@@ -1027,20 +1055,20 @@ document.querySelectorAll('[data-stepper]').forEach(b => b.onclick = async () =>
 });
 // Toggle bindings — every toggle saves immediately and affects behavior
 const TOGGLE_MAP = {
-  'pings-on': 'pingsOn', 'set-pings-on': 'pingsOn', 'buy-pings': 'buyPings', 'set-buy-pings': 'buyPings',
-  'sell-pings': 'sellPings', 'set-sell-pings': 'sellPings', 'stop-target-pings': 'stopTargetPings', 'set-stop-target-pings': 'stopTargetPings',
-  'sound-on': 'soundOn', 'set-sound': 'soundOn', 'email-pings': 'emailPings', 'set-email-pings': 'emailPings',
-  'email-trades': 'emailTrades', 'set-email-trades': 'emailTrades', 'auto-on': 'autoOn', 'set-auto-on': 'autoOn',
-  'auto-sell': 'autoSell', 'set-auto-sell': 'autoSell', 'auto-buy-dips': 'buyDips', 'set-auto-buy-dips': 'buyDips',
-  'auto-buy-momentum': 'buyMomentum', 'set-auto-buy-momentum': 'buyMomentum', 'credit-saver': 'creditSaver', 'set-credit-saver': 'creditSaver',
+  'pings-on': 'pingsOn', 'buy-pings': 'buyPings',
+  'sell-pings': 'sellPings', 'stop-target-pings': 'stopTargetPings',
+  'sound-on': 'soundOn', 'email-pings': 'emailPings',
+  'email-trades': 'emailTrades', 'auto-on': 'autoOn',
+  'auto-sell': 'autoSell', 'auto-buy-dips': 'buyDips',
+  'auto-buy-momentum': 'buyMomentum', 'credit-saver': 'creditSaver',
   'set-live-refresh': 'liveRefresh', 'set-overnight': 'overnightPrices',
 };
 for (const [id, key] of Object.entries(TOGGLE_MAP)) { const el = $(id); if (el) el.onchange = () => saveSettings({ [key]: el.checked }); }
-// Style + mode pickers (AUTO tab + Settings duplicates)
-document.querySelectorAll('#style-grid .style-card, #set-style-grid .style-card').forEach(c => c.onclick = () => saveSettings({ style: c.dataset.style }));
-document.querySelectorAll('#mode-picker .btn, #set-mode-picker .btn').forEach(c => c.onclick = () => saveSettings({ autoMode: c.dataset.mode }));
+// Style + mode pickers (AUTO tab only — Settings links out to AUTO now)
+document.querySelectorAll('#style-grid .style-card').forEach(c => c.onclick = () => saveSettings({ style: c.dataset.style }));
+document.querySelectorAll('#mode-picker .btn').forEach(c => c.onclick = () => saveSettings({ autoMode: c.dataset.mode }));
 async function requestNotify() { if (!('Notification' in window)) { banner('This browser does not support notifications'); return; } await Notification.requestPermission(); saveSettings({ browserNotify: Notification.permission === 'granted' }); updateNotifyState(); banner('Browser notifications: ' + Notification.permission); }
-$('btn-notify').onclick = requestNotify; $('btn-set-notify').onclick = requestNotify; $('btn-side-notify').onclick = requestNotify;
+$('btn-notify').onclick = requestNotify; $('btn-side-notify').onclick = requestNotify;
 // Pings feed actions
 $('btn-mark-read').onclick = async () => { await api('/api/alerts/read', { method: 'POST' }); bannerAlertId = null; await loadState(); };
 $('btn-clear-pings').onclick = async () => { const j = await api('/api/alerts/clear', { method: 'POST' }); state = j.state; bannerAlertId = null; await loadState(); };
@@ -1050,29 +1078,24 @@ async function sendCode(email, msgEl, verifyBlock) {
   catch (e) { $(msgEl).textContent = 'Code not sent: ' + e.message; }
 }
 $('btn-send-code').onclick = () => sendCode($('notify-email').value, 'email-msg', 'email-verify-block');
-$('btn-set-send-code').onclick = () => sendCode($('set-email').value, 'set-email-msg', 'set-verify-block');
 $('btn-resend-email').onclick = () => sendCode($('notify-email').value, 'email-msg', 'email-verify-block');
 async function verifyCode(code, msgEl) {
   try { const j = await api('/api/email/verify-code', { method: 'POST', body: JSON.stringify({ code }) }); state = j.state; await loadState(); $(msgEl).textContent = 'VERIFIED ✓ ' + j.email; banner('Email verified'); return true; }
   catch (e) { $(msgEl).textContent = 'Verify failed: ' + e.message; return false; }
 }
 $('btn-verify-email').onclick = () => verifyCode($('email-verify-code').value, 'email-msg');
-$('btn-set-verify').onclick = () => verifyCode($('set-verify-code').value, 'set-email-msg');
 async function testEmail(msgEl) {
   try { const j = await api('/api/email/test', { method: 'POST' }); $(msgEl).textContent = j.sent ? 'Test email sent — check your inbox.' : 'Test email not sent: ' + (j.reason || 'unknown'); }
   catch (e) { $(msgEl).textContent = 'Test email failed: ' + e.message; }
 }
 $('btn-test-email').onclick = () => testEmail('email-msg');
-$('btn-set-test-email').onclick = () => testEmail('set-email-msg');
 async function clearEmail(msgEl) {
   try { const j = await api('/api/email/clear', { method: 'POST' }); state = j.state; await loadState(); $(msgEl).textContent = 'Email cleared.'; }
   catch (e) { $(msgEl).textContent = 'Clear failed: ' + e.message; }
 }
 $('btn-clear-email').onclick = () => clearEmail('email-msg');
-$('btn-set-clear-email').onclick = () => clearEmail('set-email-msg');
 // AUTO actions
 $('btn-run-now').onclick = async () => { const j = await api('/api/auto/run', { method: 'POST' }); state = j.state; await loadState(); banner('Check ran: ' + (j.action || '')); };
-$('btn-set-run-now').onclick = () => $('btn-run-now').onclick();
 $('btn-clear-auto-log').onclick = async () => { const j = await api('/api/auto-log', { method: 'DELETE' }); state = j.state; await loadState(); banner('Auto log cleared'); };
 // Starting cash
 document.querySelectorAll('.sc-preset').forEach(b => b.onclick = () => { $('start-cash').value = b.dataset.startcash; $('btn-apply-startcash').textContent = 'RESTART MY GAME AT ' + money(+b.dataset.startcash); });
@@ -1092,7 +1115,7 @@ $('btn-side-feedback').onclick = () => sendFeedback('side-feedback', 'side-feedb
 $('btn-set-feedback').onclick = () => sendFeedback('set-feedback', 'set-feedback-msg');
 // Reset / delete / sign out
 function openReset() { $('reset-modal').classList.remove('hidden'); }
-$('btn-reset').onclick = openReset; $('btn-reset2').onclick = openReset; $('btn-side-reset').onclick = openReset; $('btn-footer-reset').onclick = openReset;
+$('btn-reset2').onclick = openReset;
 $('btn-cancel-reset').onclick = () => $('reset-modal').classList.add('hidden');
 $('btn-confirm-reset').onclick = async () => { await api('/api/reset', { method: 'POST', body: JSON.stringify({ confirm: true }) }); $('reset-modal').classList.add('hidden'); banner('Reset complete.'); await refreshAll(); loadExtras(true); };
 $('btn-cancel-delete').onclick = () => $('delete-modal').classList.add('hidden');
@@ -1101,12 +1124,16 @@ $('btn-confirm-delete').onclick = async () => {
   catch (e) { $('delete-msg').textContent = e.message; }
 };
 async function doLogout() { try { await api('/api/auth/logout', { method: 'POST' }); } catch {} token = ''; localStorage.removeItem('verityinvest-token'); location.reload(); }
-$('btn-logout').onclick = doLogout; $('btn-signout2').onclick = doLogout; $('btn-side-signout').onclick = doLogout;
+$('btn-side-signout').onclick = doLogout;
 $('btn-live-toggle').onclick = async () => { if (!state) return; await saveSettings({ liveRefresh: !(state.settings.liveRefresh !== false) }); if (state.settings.liveRefresh !== false) await loadQuotes(); };
 // Sidebar shortcuts
 $('btn-side-ping-rules').onclick = () => gotoTab('pings');
 $('btn-side-auto-controls').onclick = () => gotoTab('auto');
 $('side-own-picks').onclick = () => gotoTab('trade');
+// Settings links out to the tabs that own those controls (no duplicates).
+$('btn-set-goto-pings').onclick = () => gotoTab('pings');
+$('btn-set-goto-pings2').onclick = () => gotoTab('pings');
+$('btn-set-goto-auto').onclick = () => gotoTab('auto');
 // Auth
 async function tryAuth(path, body) {
   $('auth-error').textContent = '';
@@ -1203,9 +1230,27 @@ function applyDiscordLinks(url) {
     else { el.removeAttribute('href'); el.removeAttribute('target'); el.setAttribute('aria-disabled', 'true'); el.textContent = 'DISCORD — COMING SOON'; }
   }
 }
-async function loadDiscordLink() {
-  try { const r = await fetch('/api/config'); const j = await r.json(); applyDiscordLinks(j.discordInviteUrl || ''); }
-  catch { applyDiscordLinks(''); }
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config'); const j = await r.json();
+    serverConfig = { smtpConfigured: j.smtpConfigured !== false, aiConfigured: !!j.aiConfigured };
+    applyDiscordLinks(j.discordInviteUrl || '');
+    applyServerConfigBadges();
+  } catch { applyDiscordLinks(''); }
+}
+// Banners/badges driven by the server's capability flags:
+// - email not configured => banner above the SEND CODE buttons (Pings +
+//   Settings) so players know upfront that no email can send.
+// - no AI key => "Rules-only mode — no AI key" badge on AUTO + Predictor.
+function applyServerConfigBadges() {
+  const smtpOff = serverConfig.smtpConfigured === false;
+  for (const id of ['email-not-configured', 'set-email-not-configured']) {
+    const el = $(id); if (el) el.classList.toggle('hidden', !smtpOff);
+  }
+  const rulesOnly = serverConfig.aiConfigured === false;
+  for (const id of ['auto-ai-badge', 'pred-ai-badge']) {
+    const el = $(id); if (el) el.classList.toggle('hidden', !rulesOnly);
+  }
 }
 // Welcome board
 (function renderWelcomeBoard() {
@@ -1219,7 +1264,7 @@ async function loadDiscordLink() {
 (async () => {
   applyTheme(localStorage.getItem('verityinvest-theme') || 'terminal');
   renderThemePickers();
-  await loadDiscordLink();
+  await loadConfig();
   if (!localStorage.getItem('verityinvest-welcomed')) showWelcome(); else $('welcome-screen').classList.add('hidden');
   if (token) {
     try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}

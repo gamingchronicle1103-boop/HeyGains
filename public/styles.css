@@ -69,7 +69,10 @@ h1,h2,h3{font-family:var(--display);font-weight:400;letter-spacing:.01em;margin-
 .autodot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:5px;vertical-align:middle}
 main{padding:14px 18px 40px;max-width:1180px;margin:0 auto}
 .grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:16px;margin-bottom:16px;align-items:start}
-@media(max-width:860px){.grid{grid-template-columns:1fr}.tabs{top:0;position:static}}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
+/* The topbar wraps to two rows below ~1100px, so a fixed 57px sticky offset
+   would park the tabs over the topbar — make the tabs static there instead. */
+@media(max-width:1100px){.tabs{top:0;position:static}}
 
 /* ---------- Cards / sections ---------- */
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px}
@@ -148,6 +151,7 @@ canvas{width:100%;height:320px;background:#06090a;border:1px solid var(--border)
 .wl-row .wl-chg{font-weight:700;text-align:right;font-size:13px}
 .wl-row .wl-ext{font-size:12px;text-align:right}
 .banner{background:var(--green-bg);border:1px solid rgba(43,255,136,.4);color:#b7f0c9;padding:11px 16px;margin:12px auto 0;max-width:1180px;border-radius:6px;font-size:14px;animation:ticker-in .25s ease-out;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.banner.warn{background:var(--amber-bg);border-color:rgba(255,176,46,.45);color:#ffd98a}
 .banner .spacer{flex:1}
 .log-row,.trade-row,.ping-row,.pos-row,.mover-row{padding:9px 2px;border-bottom:1px solid var(--border);font-size:14px}
 .log-row:last-child,.trade-row:last-child,.ping-row:last-child,.pos-row:last-child,.mover-row:last-child{border-bottom:0}
