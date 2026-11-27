@@ -1637,7 +1637,7 @@ function challengeProgress(uid, key, todayKey, dayStart, dayEnd, st) {
     case 'sell-profit': { const c = db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND pnl>0 AND created_at>=? AND created_at<? AND ((side='sell') OR (side='buy' AND source LIKE '%-cover'))").get(uid, dayStart, dayEnd).c; return { progress: Math.min(c, 1), goal: 1 }; }
     case 'hold-overnight': {
       const open = db.prepare('SELECT COUNT(*) c FROM positions WHERE user_id=? AND created_at<?').get(uid, dayStart).c;
-      const closed = db.prepare("SELECT COUNT(*) c FROM trades t WHERE user_id=? AND t.created_at>=? AND t.created_at<? AND ((t.side='sell' AND t.pnl<>0) OR (t.side='buy' AND t.source LIKE '%-cover')) AND EXISTS (SELECT 1 FROM trades b WHERE b.user_id=t.user_id AND b.symbol=t.symbol AND b.created_at<? AND ((b.side='buy' AND b.source NOT LIKE '%-cover') OR (b.side='sell' AND b.source LIKE '%-short')))").get(uid, dayStart, dayEnd, dayStart).c;
+      const closed = db.prepare("SELECT COUNT(*) c FROM trades t WHERE user_id=? AND t.created_at>=? AND t.created_at<? AND ((t.side='sell' AND t.source NOT LIKE '%-short') OR (t.side='buy' AND t.source LIKE '%-cover')) AND EXISTS (SELECT 1 FROM trades b WHERE b.user_id=t.user_id AND b.symbol=t.symbol AND b.created_at<? AND ((b.side='buy' AND b.source NOT LIKE '%-cover') OR (b.side='sell' AND b.source LIKE '%-short')))").get(uid, dayStart, dayEnd, dayStart).c;
       return { progress: (open > 0 || closed > 0) ? 1 : 0, goal: 1 };
     }
     default: return { progress: 0, goal: 1 };
@@ -1690,10 +1690,14 @@ app.post('/api/activity/view', auth, (req, res) => {
 // "you would have made $X more by holding" is NOT computed, because the
 // price 1 day after a sell is not in the DB.
 function computeCoach(uid) {
-  const closed = db.prepare("SELECT * FROM trades WHERE user_id=? AND pnl<>0 AND ((side='sell') OR (side='buy' AND source LIKE '%-cover')) ORDER BY created_at ASC").all(uid);
+  // A close is a long sell (not a short-open sell) or a short cover —
+  // breakeven closes count too (pnl 0), they just count as neither win
+  // nor loss in the win rate.
+  const closed = db.prepare("SELECT * FROM trades WHERE user_id=? AND ((side='sell' AND source NOT LIKE '%-short') OR (side='buy' AND source LIKE '%-cover')) ORDER BY created_at ASC").all(uid);
   if (!closed.length) return { empty: true, observations: [], stats: null };
   const wins = closed.filter(t => t.pnl > 0), losses = closed.filter(t => t.pnl < 0);
-  const winRate = Math.round((wins.length / closed.length) * 1000) / 10;
+  const decisive = wins.length + losses.length;
+  const winRate = decisive ? Math.round((wins.length / decisive) * 1000) / 10 : 0;
   const avgWin = wins.length ? wins.reduce((a, t) => a + t.pnl, 0) / wins.length : 0;
   const avgLoss = losses.length ? losses.reduce((a, t) => a + t.pnl, 0) / losses.length : 0; // negative
   // Holding time: pair each close with the latest earlier open of the
@@ -1717,7 +1721,8 @@ function computeCoach(uid) {
   const allTrades = db.prepare('SELECT symbol, COUNT(*) c FROM trades WHERE user_id=? GROUP BY symbol ORDER BY c DESC LIMIT 1').get(uid);
   const fmt$ = v => '$' + Number(v).toFixed(2);
   const obs = [];
-  obs.push(`Win rate ${winRate}% — ${wins.length} wins out of ${closed.length} closed trades. Average win ${fmt$(avgWin)}, average loss ${fmt$(avgLoss)}${avgWin && avgLoss ? ` — your wins are ${(avgWin / Math.abs(avgLoss)).toFixed(1)}x the size of your losses.` : '.'}`);
+  if (decisive) obs.push(`Win rate ${winRate}% — ${wins.length} wins out of ${decisive} decisive closed trades (${closed.length} closed in total). Average win ${fmt$(avgWin)}, average loss ${fmt$(avgLoss)}${avgWin && avgLoss ? ` — your wins are ${(avgWin / Math.abs(avgLoss)).toFixed(1)}x the size of your losses.` : '.'}`);
+  else obs.push(`No wins or losses yet — all ${closed.length} closed trade${closed.length === 1 ? '' : 's'} broke even. Wins and losses will show here once a close moves off breakeven.`);
   if (avgHoldHrs != null) {
     const holdTxt = avgHoldHrs < 24 ? `${avgHoldHrs.toFixed(1)} hours` : `${(avgHoldHrs / 24).toFixed(1)} days`;
     obs.push(`You hold trades for ${holdTxt} on average${avgHoldHrs < 24 ? ' — fast in-and-out, a day-trading pace.' : avgHoldHrs < 24 * 7 ? ' — a swing-trading pace.' : ' — a position-trading pace, weeks at a time.'}`);
@@ -1728,7 +1733,9 @@ function computeCoach(uid) {
       ? `Stop discipline is clean — you honoured your stop on all ${losingSells.length} losing sell${losingSells.length === 1 ? '' : 's'} (losses cut within ~7% of the exit value).`
       : `Stop discipline: ${honoured} of ${losingSells.length} losing sells (${honPct}%) were cut within ~7% of the exit value — the rest ran past your stop line. Cutting sooner on those would have kept the losses smaller.`);
   } else {
-    obs.push('No losing sells yet — every closed trade so far is a win. The stop line has not been tested.');
+    obs.push(wins.length
+      ? 'No losing sells yet — every closed trade so far is a win. The stop line has not been tested.'
+      : 'No losing sells yet — no closed trade has finished in the red. The stop line has not been tested.');
   }
   if (best && worst && best.symbol !== worst.symbol) {
     obs.push(`Best ticker: ${best.symbol} (${fmt$(best.avg)} average per closed trade, ${best.n} trade${best.n === 1 ? '' : 's'}). Worst ticker: ${worst.symbol} (${fmt$(worst.avg)} average per closed trade, ${worst.n} trade${worst.n === 1 ? '' : 's'}).`);

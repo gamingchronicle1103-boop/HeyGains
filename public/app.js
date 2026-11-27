@@ -13,6 +13,7 @@ let state = null, quotes = {}, chartData = null, chartMode = 'line', chartRange 
 let tradeSide = 'buy', orderSide = 'buy', lastChartLoad = 0, lastNewsLoad = 0, refreshTimer = null, newsTimer = null;
 let notifiedIds = new Set(), prevPrices = {}, bannerAlertId = null, authMode = 'signin', claimName = '';
 let wlSearch = '', wlSort = 'default', tradeInFlight = false, predMode = 'ai';
+let leagueData = null, leagueCountdownTimer = null;
 // Predictor daily limit (AI mode only): standard members get 2 Verity AI
 // questions per ET day; rules-only questions are unlimited and never
 // counted; the owner is unlimited in both modes. updatePredLimit() keeps
@@ -237,7 +238,15 @@ function sparkSvg(spark, up) {
 async function loadState() {
   state = await api('/api/state');
   applyDiscordLinks(state.discordInviteUrl || '');
+  applyDonateLinks(state.donateUrl || '');
   $('user-line').textContent = 'Playing as ' + state.user.name + (state.user.isOwner ? ' · OWNER' : '');
+  // League tier badge on the scoreboard (from /api/state — no extra call).
+  const lb = $('league-badge');
+  if (lb && state.league) {
+    lb.textContent = '◆ ' + state.league.tierName.toUpperCase() + ' LEAGUE';
+    lb.style.color = state.league.tierColor; lb.style.borderColor = state.league.tierColor + '66';
+    lb.classList.remove('hidden');
+  }
   flashNum($('net-worth-big'), state.netWorth, money(state.netWorth));
   $('net-worth-sub').innerHTML = `All-time <b class="${state.allTime >= 0 ? 'up' : 'down'}">${state.allTime >= 0 ? '+' : ''}${money(state.allTime)} (${pct(state.allTimePct)})</b> · Best worth <b>${money(state.bestWorth || state.netWorth)}</b>`;
   flashEl($('net-worth-sub'), 'net-worth-sub', state.netWorth);
@@ -266,6 +275,7 @@ async function loadState() {
   const unread = state.alerts.filter(a => !a.read).length;
   $('ping-count').textContent = unread; $('ping-count').classList.toggle('hidden', !unread);
   loadExtras(false); // leaderboard / portfolio history / achievements, throttled to 60 s
+  loadChallenges(false); // daily challenges + streak, throttled to 60 s
   $('side-ping-badge').textContent = unread; $('side-ping-badge').classList.toggle('hidden', !unread);
   $('auto-dot').classList.toggle('hidden', !state.settings.autoOn);
   const lt = $('btn-live-toggle'); const live = state.settings.liveRefresh !== false;
@@ -337,17 +347,155 @@ async function loadExtras(force) {
   if (!force && Date.now() - lastExtrasLoad < 60000) return;
   lastExtrasLoad = Date.now();
   try {
-    const [lb, ph, ach, tr] = await Promise.all([api('/api/leaderboard'), api('/api/portfolio-history'), api('/api/achievements'), api('/api/predictor/track-record')]);
-    leaderboardData = lb; portfolioHistory = ph; achievementsData = ach; predictorTrackRecord = tr;
-    renderLeaderboard(); renderWelcomeLeaderboard(); renderAchievements(); drawPortfolioChart(); renderPredictorTrackRecord();
+    const [lb, ph, ach, tr, lg] = await Promise.all([api('/api/leaderboard'), api('/api/portfolio-history'), api('/api/achievements'), api('/api/predictor/track-record'), api('/api/leagues')]);
+    leaderboardData = lb; portfolioHistory = ph; achievementsData = ach; predictorTrackRecord = tr; leagueData = lg;
+    renderLeaderboard(); renderWelcomeLeaderboard(); renderAchievements(); drawPortfolioChart(); renderPredictorTrackRecord(); renderLeagues();
   } catch { /* extras are non-critical — the game still works without them */ }
 }
+// ---------- Daily challenges + streaks ----------
+// Throttled like loadExtras — the 10 s refresh must not re-fetch these.
+let challengesData = null, lastChallengesLoad = 0;
+async function loadChallenges(force) {
+  if (!force && Date.now() - lastChallengesLoad < 60000) return;
+  lastChallengesLoad = Date.now();
+  try { challengesData = await api('/api/challenges'); renderChallenges(); } catch { /* non-critical */ }
+}
+function renderChallenges() {
+  const el = $('challenges-list'); if (!el || !challengesData) return;
+  const d = challengesData;
+  const flame = $('challenges-streak'); if (flame) flame.textContent = `🔥 ${d.streak}-DAY STREAK · ${d.xp} XP`;
+  const badge = $('streak-badge');
+  if (badge) { badge.textContent = d.streak > 0 ? `🔥 ${d.streak}-DAY STREAK` : '🔥 START A STREAK — TRADE OR FINISH A CHALLENGE TODAY'; badge.classList.remove('hidden'); }
+  el.innerHTML = d.challenges.map(c => {
+    const stateTxt = c.claimed ? '<span class="tag green">✓ CLAIMED +' + c.xp + ' XP</span>'
+      : c.done ? `<button class="btn small primary" data-claim="${escapeHtml(c.key)}">CLAIM +${c.xp} XP</button>`
+      : `<span class="muted small">${c.progress}/${c.goal}</span>`;
+    return `<div class="challenge-row"><span class="challenge-check">${c.done || c.claimed ? '✓' : '○'}</span><span><strong>${escapeHtml(c.title)}</strong><br><span class="muted small">${escapeHtml(c.desc)}</span></span><span class="spacer"></span>${stateTxt}</div>`;
+  }).join('');
+  el.querySelectorAll('[data-claim]').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = 'CLAIMING…';
+    try { const j = await api('/api/challenges/claim', { method: 'POST', body: JSON.stringify({ key: b.dataset.claim }) }); challengesData = j; lastChallengesLoad = Date.now(); renderChallenges(); }
+    catch (e) { b.disabled = false; b.textContent = 'CLAIM +10 XP'; alert('Could not claim: ' + (e.message || 'try again')); }
+  });
+}
+// Ticker views feed the "Check 3 different tickers" challenge. Report a
+// view at most once per ticker per ET day — the server dedupes too, but
+// the 10 s chart refresh must not spam it.
+let viewedTodayDate = '', viewedTodaySyms = new Set();
+function trackTickerView(sym) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  if (today !== viewedTodayDate) { viewedTodayDate = today; viewedTodaySyms = new Set(); }
+  if (viewedTodaySyms.has(sym)) return;
+  viewedTodaySyms.add(sym);
+  api('/api/activity/view', { method: 'POST', body: JSON.stringify({ symbol: sym }) }).catch(() => {});
+}
+
+// ---------- Trade review / Coach (rules) ----------
+async function loadCoach() {
+  const el = $('coach-list'); if (!el) return;
+  const btn = $('btn-coach-refresh');
+  if (btn && !btn.dataset.bound) { btn.dataset.bound = '1'; btn.onclick = () => loadCoach(); }
+  el.innerHTML = '<p class="muted">Reading your trades…</p>';
+  try {
+    const j = await api('/api/coach');
+    if (j.empty) { el.innerHTML = '<p class="muted">No trades yet — make your first trade to get coaching.</p>'; return; }
+    el.innerHTML = j.observations.map(o => `<div class="coach-obs">${escapeHtml(o)}</div>`).join('') +
+      `<p class="muted small">Based on ${j.stats.closed} closed trade${j.stats.closed === 1 ? '' : 's'} · win rate ${j.stats.winRate}% · avg win ${money(j.stats.avgWin)} · avg loss ${money(j.stats.avgLoss)}${j.stats.avgHoldHrs != null ? ` · avg hold ${j.stats.avgHoldHrs < 24 ? j.stats.avgHoldHrs + 'h' : (j.stats.avgHoldHrs / 24).toFixed(1) + ' days'}` : ''} · stops honoured ${j.stats.stopHonoured}/${j.stats.stopTotal}. Rules only — no AI involved.</p>`;
+  } catch { el.innerHTML = '<p class="muted">Could not load coaching — try again.</p>'; }
+}
+
+// ---------- Shareable trade cards ----------
+// The opening trade for a closed trade: latest earlier trade of the same
+// symbol with the opposite side (a buy for a long sell, a short-open sell
+// for a cover). state.trades is newest-first, limit 50.
+function closedTradePair(t) {
+  const idx = (state.trades || []).findIndex(x => x.id === t.id);
+  const earlier = (state.trades || []).slice(idx + 1);
+  if (t.side === 'sell' && !String(t.source || '').endsWith('-short')) return earlier.find(x => x.symbol === t.symbol && x.side === 'buy' && !String(x.source || '').endsWith('-cover'));
+  if (t.side === 'buy' && String(t.source || '').endsWith('-cover')) return earlier.find(x => x.symbol === t.symbol && x.side === 'sell' && String(x.source || '').endsWith('-short'));
+  return null;
+}
+function tradeCardData(t) {
+  const open = closedTradePair(t);
+  const entry = open ? open.price : null;
+  const exit = t.price;
+  const won = t.pnl > 0;
+  const pnlPct = entry ? ((t.side === 'sell' ? (exit - entry) : (entry - exit)) / entry) * 100 : null;
+  return { entry, exit, won, pnlPct, verb: t.side === 'sell' ? (String(t.source || '').endsWith('-short') ? 'SHORTED' : 'SOLD') : 'COVERED' };
+}
+function drawTradeCard(t) {
+  const d = tradeCardData(t);
+  const cv = document.createElement('canvas'); cv.width = 900; cv.height = 1125;
+  const x = cv.getContext('2d');
+  const accent = d.won ? '#2bff88' : '#ff4757';
+  x.fillStyle = '#06090a'; x.fillRect(0, 0, 900, 1125);
+  x.fillStyle = accent; x.fillRect(0, 0, 900, 14);
+  x.fillStyle = '#2bff88'; x.font = '700 34px "JetBrains Mono", monospace'; x.fillText('HEYGAINS', 56, 90);
+  x.fillStyle = '#7d8f83'; x.font = '400 24px "JetBrains Mono", monospace'; x.fillText('PAPER TRADING', 56, 126);
+  x.fillStyle = '#e8f0ea'; x.font = '400 110px "Archivo Black", sans-serif'; x.fillText(t.symbol, 56, 260);
+  x.fillStyle = accent; x.font = '700 40px "JetBrains Mono", monospace'; x.fillText(d.verb + '  ' + t.shares + ' SHARES', 56, 330);
+  x.fillStyle = '#7d8f83'; x.font = '400 30px "JetBrains Mono", monospace';
+  x.fillText('ENTRY', 56, 430); x.fillText('EXIT', 480, 430);
+  x.fillStyle = '#e8f0ea'; x.font = '700 52px "JetBrains Mono", monospace';
+  x.fillText(d.entry != null ? money(d.entry) : '—', 56, 500);
+  x.fillText(money(d.exit), 480, 500);
+  x.fillStyle = '#7d8f83'; x.font = '400 30px "JetBrains Mono", monospace'; x.fillText('P&L', 56, 600);
+  x.fillStyle = accent; x.font = '700 96px "JetBrains Mono", monospace';
+  x.fillText((d.won ? '+' : '') + money(t.pnl), 56, 700);
+  x.font = '700 52px "JetBrains Mono", monospace';
+  x.fillText(d.pnlPct != null ? ((d.pnlPct >= 0 ? '+' : '') + d.pnlPct.toFixed(1) + '%') : '', 56, 780);
+  x.fillStyle = '#7d8f83'; x.font = '400 28px "JetBrains Mono", monospace';
+  x.fillText(new Date(t.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' · ' + (state?.user?.name || ''), 56, 880);
+  x.fillText('Real prices. Fake money. Zero risk.', 56, 930);
+  x.fillStyle = '#2bff88'; x.font = '700 30px "JetBrains Mono", monospace'; x.fillText('HEYGAINS', 56, 1050);
+  x.fillStyle = '#7d8f83'; x.font = '400 24px "JetBrains Mono", monospace'; x.fillText('Paper trading only — no real money, no real orders.', 56, 1088);
+  return cv;
+}
+function shareTradeCard(t) {
+  const cv = drawTradeCard(t);
+  cv.toBlob(b => {
+    if (!b) { alert('Could not render the card — try again.'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = `heygains-${t.symbol}-${t.id}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }, 'image/png');
+}
+function copyTradeText(t) {
+  const d = tradeCardData(t);
+  const pctTxt = d.pnlPct != null ? ` (${d.pnlPct >= 0 ? '+' : ''}${d.pnlPct.toFixed(1)}%)` : '';
+  const verb = d.won ? 'made' : 'lost';
+  const invite = state?.discordInviteUrl ? ` Join: ${state.discordInviteUrl}` : '';
+  const txt = `I just ${verb} ${money(t.pnl)}${pctTxt} on ${t.symbol} with HeyGains! 📈 Paper trading — real prices, fake money.${invite}`;
+  const done = () => alert('Copied — paste it in Discord!');
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(txt).then(done, () => fallbackCopy(txt, done));
+  else fallbackCopy(txt, done);
+}
+function fallbackCopy(txt, done) {
+  const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch { alert('Copy failed — select and copy manually:\n' + txt); }
+  document.body.removeChild(ta);
+}
+
+// ---------- Donations ----------
+// Donate button — the URL lives on the server (DONATE_URL env), never
+// hard-coded here. While it is empty the buttons read "coming soon" and
+// link nowhere; once Lucas sets his Ko-fi link they open it in a new tab.
+function applyDonateLinks(url) {
+  for (const id of ['donate-welcome', 'donate-sidebar']) {
+    const el = $(id); if (!el) continue;
+    if (url) { el.href = url; el.target = '_blank'; el.rel = 'noopener'; el.removeAttribute('aria-disabled'); el.textContent = id === 'donate-welcome' ? 'DONATE ↗' : 'DONATE ↗'; }
+    else { el.removeAttribute('href'); el.removeAttribute('target'); el.setAttribute('aria-disabled', 'true'); el.textContent = 'DONATE — COMING SOON'; }
+  }
+}
+
 // Leaderboard rows: ranked by % return — the all-time % is the big
 // number, net worth $ is secondary info, today % last.
 function leaderboardRowsHtml(players, you, limit) {
   const rows = (players || []).slice(0, limit || players.length);
   if (!rows.length) return '<p class="muted">No players yet.</p>';
-  return rows.map(p => `<div class="lb-row"><span class="lb-rank">#${p.rank}</span><span class="lb-name"><strong>${escapeHtml(p.name)}</strong>${p.isOwner ? ' <span class="tag green">OWNER</span>' : ''}${p.name === you ? ' <span class="tag">YOU</span>' : ''}</span><span class="lb-pct-main flash-inline ${p.allTimePct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:pct">${pct(p.allTimePct)}</span><span class="lb-worth flash-inline" data-lb="${escapeHtml(p.name)}:worth">${money(p.netWorth)}</span><span class="lb-pct lb-today flash-inline ${p.todayPct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:today">${pct(p.todayPct)} today</span></div>`).join('');
+  return rows.map(p => `<div class="lb-row"><span class="lb-rank">#${p.rank}</span><span class="lb-name"><strong>${escapeHtml(p.name)}</strong>${p.isOwner ? ' <span class="tag green">OWNER</span>' : ''}${p.name === you ? ' <span class="tag">YOU</span>' : ''}${p.leagueTierName ? ` <span class="tag league-tag" style="color:${escapeHtml(p.leagueTierColor || '#c0c0c0')};border-color:${escapeHtml(p.leagueTierColor || '#c0c0c0')}55">◆ ${escapeHtml(p.leagueTierName)}</span>` : ''}</span><span class="lb-pct-main flash-inline ${p.allTimePct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:pct">${pct(p.allTimePct)}</span><span class="lb-worth flash-inline" data-lb="${escapeHtml(p.name)}:worth">${money(p.netWorth)}</span><span class="lb-pct lb-today flash-inline ${p.todayPct >= 0 ? 'up' : 'down'}" data-lb="${escapeHtml(p.name)}:today">${pct(p.todayPct)} today</span></div>`).join('');
 }
 // Flash leaderboard numbers when they move between refreshes.
 function flashLeaderboard(el) {
@@ -406,6 +554,47 @@ function renderWelcomeLeaderboard() {
   const el = $('welcome-leaderboard'); if (!el || !leaderboardData) return;
   el.innerHTML = leaderboardRowsHtml(leaderboardData.players, leaderboardData.you, 5);
   flashLeaderboard(el);
+}
+// ---------- Weekly LEAGUES ----------
+// Standings, zones and countdown. The tier badge on the scoreboard comes
+// from /api/state (loadState); this tab is the full league view.
+async function loadLeagues() {
+  try { leagueData = await api('/api/leagues'); renderLeagues(); }
+  catch { const el = $('leagues-list'); if (el) el.innerHTML = '<p class="muted">Could not load leagues — try again in a moment.</p>'; }
+}
+function leagueCountdownText() {
+  if (!leagueData?.weekEndsAt) return '';
+  let ms = leagueData.weekEndsAt - Date.now();
+  if (ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return d > 0 ? `${d}d ${h}h ${String(m).padStart(2, '0')}m ${String(ss).padStart(2, '0')}s` : `${h}h ${String(m).padStart(2, '0')}m ${String(ss).padStart(2, '0')}s`;
+}
+function updateLeagueCountdown() {
+  const el = $('league-countdown'); if (!el || !leagueData) return;
+  el.textContent = 'Week ends in ' + leagueCountdownText();
+}
+function renderLeagues() {
+  const head = $('leagues-head'), list = $('leagues-list'), banner = $('leagues-banner'), foot = $('leagues-foot');
+  if (!head || !leagueData) return;
+  const lg = leagueData;
+  const tierStyle = `color:${escapeHtml(lg.tierColor)}`;
+  head.innerHTML = `<p><span class="league-tier-name" style="${tierStyle}">◆ ${escapeHtml(lg.tierName).toUpperCase()} LEAGUE</span> <span class="muted small">· ${lg.leagueSize} player${lg.leagueSize === 1 ? '' : 's'} in your league · <span id="league-countdown">Week ends in ${escapeHtml(leagueCountdownText())}</span></span></p>${lg.you ? `<p>You're <b>#${lg.you.rank}</b> · <b class="${lg.you.weeklyPct >= 0 ? 'up' : 'down'}">${pct(lg.you.weeklyPct)} this week</b> · net worth ${money(lg.you.netWorth)}</p>` : ''}<p class="muted small">Ranked by this week's % return. <span class="up">Top ${lg.promoteCount} promote ▲</span> · <span class="down">Bottom ${lg.demoteCount} demote ▼</span> · the middle stays.</p>`;
+  if (banner) {
+    if (lg.lastResult) {
+      const cls = lg.lastResultKind === 'promoted' ? 'up' : lg.lastResultKind === 'demoted' ? 'down' : '';
+      banner.innerHTML = `<p class="banner ${lg.lastResultKind === 'promoted' ? '' : 'warn'}"><strong class="${cls}">${escapeHtml(lg.lastResult)}</strong> <span class="muted small">Last week's result — this week is a fresh start.</span></p>`;
+    } else banner.innerHTML = '';
+  }
+  if (!lg.standings?.length) { list.innerHTML = '<p class="muted">No standings yet.</p>'; }
+  else {
+    list.innerHTML = lg.standings.map(p => {
+      const zoneTag = p.zone === 'promote' ? '<span class="tag green">▲ PROMOTES</span>' : p.zone === 'demote' ? '<span class="tag red">▼ DEMOTES</span>' : '';
+      return `<div class="league-row${p.isYou ? ' you' : ''}"><span class="lb-rank">#${p.rank}</span><span class="lb-name"><strong>${escapeHtml(p.name)}</strong>${p.isOwner ? ' <span class="tag green">OWNER</span>' : ''}${p.isYou ? ' <span class="tag">YOU</span>' : ''} ${zoneTag}</span><span class="lb-pct-main ${p.weeklyPct >= 0 ? 'up' : 'down'}">${pct(p.weeklyPct)}</span><span class="lb-worth">${money(p.netWorth)}</span><span class="lb-pct lb-today">${p.zone === 'promote' ? '▲ top ' + lg.promoteCount : p.zone === 'demote' ? '▼ bottom ' + lg.demoteCount : 'stays'}</span></div>`;
+    }).join('');
+  }
+  if (foot) foot.textContent = `Week of ${lg.weekKey} (Mon–Sun, ET) · Tiers: ${lg.tiers.map(t => t.name).join(' → ')}`;
+  if (!leagueCountdownTimer) leagueCountdownTimer = setInterval(updateLeagueCountdown, 1000);
 }
 function renderAchievements() {
   const rankEl = $('achievements-rank'), listEl = $('achievements-list');
@@ -506,7 +695,7 @@ async function loadChart() {
   const myToken = ++chartLoadToken;
   $('chart-error').classList.add('hidden');
   hoverIdx = -1; const _tip = $('chart-tip'); if (_tip) _tip.classList.add('hidden');
-  try { const data = await api(`/api/history?symbol=${chartSymbol}&range=${chartRange}`); if (myToken !== chartLoadToken) return; chartData = data; lastChartLoad = Date.now(); }
+  try { const data = await api(`/api/history?symbol=${chartSymbol}&range=${chartRange}`); if (myToken !== chartLoadToken) return; chartData = data; lastChartLoad = Date.now(); trackTickerView(chartSymbol); }
   catch (e) { if (myToken !== chartLoadToken) return; $('chart-error').textContent = 'Chart is warming up — the feed didn\'t answer. '; const b = document.createElement('button'); b.className = 'btn small'; b.textContent = 'Retry'; b.onclick = loadChart; $('chart-error').appendChild(b); $('chart-error').classList.remove('hidden'); return; }
   const q = quotes[chartSymbol];
   $('chart-title').textContent = chartSymbol + ' — ' + symName(chartSymbol);
@@ -944,8 +1133,11 @@ function renderTrades() {
   el.innerHTML = state.trades.map(t => {
     const src = String(t.source || '');
     const kindTag = src.endsWith('-short') ? ' <span class="tag red">SHORT</span>' : src.endsWith('-cover') ? ' <span class="tag amber">COVER</span>' : '';
-    return `<div class="trade-row"><span class="chip ${t.side === 'buy' ? 'buy' : 'sell'}">${escapeHtml(String(t.side || '').toUpperCase())}</span>${kindTag} <strong>${escapeHtml(t.symbol)}</strong> · ${t.shares} shares @ ${money(t.price)} · ${money(t.total)} · ${fmtDT(t.created_at)} · ${escapeHtml(t.session || '')} · ${escapeHtml(t.source || '')}${t.pnl ? ` · Realized P&L <span class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</span>` : ''}</div>`;
+    const closed = !!t.pnl && ((t.side === 'sell' && !src.endsWith('-short')) || (t.side === 'buy' && src.endsWith('-cover')));
+    return `<div class="trade-row"><span class="chip ${t.side === 'buy' ? 'buy' : 'sell'}">${escapeHtml(String(t.side || '').toUpperCase())}</span>${kindTag} <strong>${escapeHtml(t.symbol)}</strong> · ${t.shares} shares @ ${money(t.price)} · ${money(t.total)} · ${fmtDT(t.created_at)} · ${escapeHtml(t.session || '')} · ${escapeHtml(t.source || '')}${t.pnl ? ` · Realized P&L <span class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</span>` : ''}${closed ? ` <button class="btn small" data-share-trade="${t.id}">SHARE ⤓ PNG</button><button class="btn small" data-copy-trade="${t.id}">COPY FOR DISCORD</button>` : ''}</div>`;
   }).join('');
+  el.querySelectorAll('[data-share-trade]').forEach(b => b.onclick = () => { const t = (state.trades || []).find(x => x.id === +b.dataset.shareTrade); if (t) shareTradeCard(t); });
+  el.querySelectorAll('[data-copy-trade]').forEach(b => b.onclick = () => { const t = (state.trades || []).find(x => x.id === +b.dataset.copyTrade); if (t) copyTradeText(t); });
 }
 async function loadNews() {
   const el = $('news');
@@ -1189,7 +1381,8 @@ function gotoTab(name) {
   $('tab-' + name).classList.remove('hidden'); closeSidebar();
   if (name === 'trade' && Date.now() - lastNewsLoad > 60000) loadNews();
   if (name === 'chat') { renderChatFilters(); loadChat(); }
-  if (name === 'stats') drawPortfolioChart(); // canvas was hidden — redraw at real width
+  if (name === 'stats') { drawPortfolioChart(); loadCoach(); } // canvas was hidden — redraw at real width
+  if (name === 'leagues') loadLeagues();
 }
 function showWelcome() { $('welcome-screen').classList.remove('hidden'); $('auth-screen').classList.add('hidden'); if (token) loadExtras(true); }
 function showAuth(mode) {
@@ -1457,6 +1650,7 @@ async function loadConfig() {
     const r = await fetch('/api/config'); const j = await r.json();
     serverConfig = { smtpConfigured: j.smtpConfigured !== false, aiConfigured: !!j.aiConfigured };
     applyDiscordLinks(j.discordInviteUrl || '');
+    applyDonateLinks(j.donateUrl || '');
     applyServerConfigBadges();
   } catch { applyDiscordLinks(''); }
 }

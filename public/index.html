@@ -28,6 +28,9 @@
     <div class="row">
       <a id="discord-welcome" class="btn big discord-btn" aria-disabled="true">DISCORD — COMING SOON</a>
     </div>
+    <div class="row">
+      <a id="donate-welcome" class="btn big" aria-disabled="true">DONATE — COMING SOON</a>
+    </div>
     <h3>WHAT'S INSIDE</h3>
     <ul class="welcome-list">
       <li><b>REAL PRICES LIVE</b>Live quotes every 10 seconds, including premarket and after-hours vs the regular close.</li>
@@ -117,6 +120,7 @@
     <button data-goto="predictor">Predictor <span>›</span></button>
     <button data-goto="pings">Pings <span id="side-ping-badge" class="count hidden"></span></button>
     <button data-goto="chat">Chat <span>›</span></button>
+    <button data-goto="leagues">Leagues <span>›</span></button>
     <button data-goto="trade" id="side-own-picks">Your own stocks &amp; crypto <span id="side-own-count"></span></button>
     <button data-goto="settings">All settings <span>›</span></button>
   </div>
@@ -128,6 +132,7 @@
   <div class="side-bottom">
     <h3>COMMUNITY</h3>
     <div class="row"><a id="discord-sidebar" class="btn discord-btn" aria-disabled="true">DISCORD — COMING SOON</a></div>
+    <div class="row"><a id="donate-sidebar" class="btn" aria-disabled="true">DONATE — COMING SOON</a></div>
     <h3>FEEDBACK</h3>
     <div id="side-feedback-inbox"></div>
     <textarea id="side-feedback" placeholder="Got an idea or found a bug? Tell Lucas…"></textarea>
@@ -154,6 +159,7 @@
     <button id="btn-live-toggle" class="badge live" title="Pause / resume live prices">● LIVE · 10s</button>
   </div>
   <div class="top-right">
+    <span id="league-badge" class="badge league-badge hidden"></span>
     <span id="user-line"></span>
     <button id="btn-refresh" class="btn small">REFRESH</button>
   </div>
@@ -162,7 +168,7 @@
 <div id="ticker-tape" class="ticker-tape" aria-label="Live ticker tape"><div id="ticker-track" class="ticker-track"></div></div>
 
 <div class="scoreboard">
-  <p class="eyebrow">NET WORTH · PAPER</p>
+  <p class="eyebrow">NET WORTH · PAPER <span id="streak-badge" class="tag amber hidden"></span></p>
   <div id="net-worth-big">$0.00</div>
   <p class="score-sub" id="net-worth-sub"></p>
   <p class="score-sub" id="net-worth-close"></p>
@@ -172,6 +178,12 @@
     <div class="score-box"><div class="score-label">SESSION</div><div class="score-val" id="score-session">—</div><div class="score-sub2" id="score-session-sub"></div></div>
   </div>
   <p class="muted small" id="ext-explainer">Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the regular close. When overnight prices are off, your game freezes at the regular close outside market hours instead.</p>
+</div>
+
+<div class="card scoreboard-extra" id="challenges-card">
+  <h2>DAILY CHALLENGES <span id="challenges-streak" class="tag amber"></span></h2>
+  <p class="muted small">Fresh challenges every day — finish one, claim it, earn XP. Play on consecutive days to grow your streak.</p>
+  <div id="challenges-list"><p class="muted">Loading today's challenges…</p></div>
 </div>
 
 <div id="banner" class="banner hidden"></div>
@@ -185,6 +197,7 @@
   <button data-tab="pings" class="tab">PINGS <span id="ping-count" class="count hidden"></span></button>
   <button data-tab="chat" class="tab">CHAT</button>
   <button data-tab="stats" class="tab">STATS</button>
+  <button data-tab="leagues" class="tab">LEAGUES</button>
   <button data-tab="settings" class="tab">SETTINGS</button>
 </nav>
 
@@ -373,6 +386,24 @@
       <h2>PORTFOLIO OVER TIME · LAST 7 DAYS</h2>
       <p class="muted small" id="portfolio-caption">Your net worth, snapshotted every couple of minutes. Grey dashed line = your starting cash.</p>
       <div class="chart-wrap"><canvas id="portfolio-chart" width="760" height="220"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>COACH (RULES)</h2>
+      <p class="muted small">A rules-based read of your recent trades — no AI, just your own numbers: win rate, average win/loss, holding time, stop discipline and your best/worst tickers.</p>
+      <div class="row"><button id="btn-coach-refresh" class="btn small">↻ REVIEW MY TRADES</button></div>
+      <div id="coach-list"><p class="muted">Tap "Review my trades" to get coaching.</p></div>
+    </div>
+  </section>
+
+  <!-- ===== LEAGUES ===== -->
+  <section id="tab-leagues" class="tabpage hidden">
+    <div class="card">
+      <h2>LEAGUES · WEEKLY COMPETITION</h2>
+      <p class="muted small">Every Monday a new week starts. You're ranked against up to 29 other players in your league by this week's % return — not all-time. Top 10 promote to the next tier, bottom 10 demote, the middle stays. New players start in Bronze. Your % rank (Paper Hands → Whale) is separate — leagues are about the week, ranks are about all-time.</p>
+      <div id="leagues-banner"></div>
+      <div id="leagues-head"><p class="muted">Loading leagues…</p></div>
+      <div id="leagues-list"><p class="muted">Loading standings…</p></div>
+      <p class="muted small" id="leagues-foot"></p>
     </div>
   </section>
 
