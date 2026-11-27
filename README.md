@@ -274,6 +274,8 @@ Put it behind a reverse proxy (nginx/Caddy) with HTTPS for real users.
 | `OWNER_NAME` | no (default `Lucas`) | Owner account name |
 | `OWNER_CLAIM_CODE` | no, but strongly recommended | Secret required to register-with-PIN or claim the owner account. Leave unset and owner claims are refused outright (fail closed). Generate with `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`. Never commit a real one. |
 | `AI_API_URL`, `AI_API_KEY`, `AI_MODEL` | no | OpenAI-compatible chat endpoint for Predictor + AUTO AI mode. Azure OpenAI: `https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=2024-02-01` with your Azure key. Without these, AI mode falls back to rules and says so. |
+| `DISCORD_INVITE_URL` | no | Community server invite shown as a "Join our Discord" button (welcome screen + menu). Blank = "coming soon", links nowhere. |
+| `DONATE_URL` | no | Donations link for the DONATE button (welcome screen + menu). Paste your own Ko-fi / Buy Me a Coffee / PayPal link. Blank = "DONATE — COMING SOON", links nowhere. No URL is ever invented. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | no | SMTP for ping / auto-trade emails and email-verification codes. Without these, NO email path works at all: no code is sent, no ping/auto email is queued, and the buttons honestly say so. |
 
 Never hardcode a real key. Keys live in `.env` (local) or the host's
