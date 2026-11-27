@@ -1,0 +1,17 @@
+{
+  "name": "heygains",
+  "version": "1.0.0",
+  "description": "HeyGains \u2014 paper stock trading simulator with live prices, Predictor, Pings, and 24/7 auto trading. Created by Lucas Do.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.3.0",
+    "nodemailer": "^10.6.1"
+  }
+}
