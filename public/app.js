@@ -1786,7 +1786,12 @@ $('btn-auth-go').onclick = () => {
   // tell the player what to fix before a round trip.
   if (name.length < 2) { $('auth-error').textContent = 'Pick a name with at least 2 characters.'; return; }
   if (name.length > 30) { $('auth-error').textContent = 'Keep your name to 30 characters or fewer.'; return; }
-  if ($('auth-pin').value.length < 6) { $('auth-error').textContent = 'Your PIN needs at least 6 characters.'; return; }
+  // PIN length is checked ONLY when creating a new account. Signing in
+  // must accept any length: legacy accounts made before the 6-char rule
+  // have 4-digit PINs, and the server verifies them against the stored
+  // hash (scrypt or legacy SHA-256) — blocking them here locks those
+  // players out of accounts they already own.
+  if (authMode === 'new' && $('auth-pin').value.length < 6) { $('auth-error').textContent = 'Your PIN needs at least 6 characters.'; return; }
   if (authMode === 'new') {
     const sc = Number($('auth-startcash').value) || 0;
     if (!(sc >= 100 && sc <= 10000000)) { $('auth-error').textContent = 'Starting cash must be between $100 and $10,000,000.'; return; }
