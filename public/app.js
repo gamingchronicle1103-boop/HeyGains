@@ -14,6 +14,28 @@ let state = null, quotes = {}, chartData = null, chartMode = 'line', chartRange 
 let tradeSide = 'buy', orderSide = 'buy', lastChartLoad = 0, lastNewsLoad = 0, refreshTimer = null, newsTimer = null;
 let notifiedIds = new Set(), prevPrices = {}, bannerAlertId = null, authMode = 'signin', claimName = '';
 let wlSearch = '', wlSort = 'default', tradeInFlight = false;
+// Device-only sign-in: the server lists EVERY player, but this device only
+// shows the accounts that were created or signed in on THIS browser.
+// Names are kept in localStorage (verityinvest-device-accounts) — a
+// different device/browser sees its own list, not yours. Tapping
+// "Show all players" reveals the full server list once, for signing in
+// on a new device or claiming an account made elsewhere.
+const DEVICE_ACCOUNTS_KEY = 'verityinvest-device-accounts';
+let showAllPlayers = false;
+function getDeviceAccounts() {
+  try { const v = JSON.parse(localStorage.getItem(DEVICE_ACCOUNTS_KEY) || '[]'); return Array.isArray(v) ? v.filter(n => typeof n === 'string' && n.trim()) : []; }
+  catch { return []; }
+}
+function saveDeviceAccount(name) {
+  const n = String(name || '').trim(); if (!n) return;
+  const list = getDeviceAccounts();
+  if (!list.some(x => x.toLowerCase() === n.toLowerCase())) { list.push(n); localStorage.setItem(DEVICE_ACCOUNTS_KEY, JSON.stringify(list.slice(-12))); }
+}
+function removeDeviceAccount(name) {
+  const n = String(name || '').trim().toLowerCase();
+  localStorage.setItem(DEVICE_ACCOUNTS_KEY, JSON.stringify(getDeviceAccounts().filter(x => x.toLowerCase() !== n)));
+  loadPlayers();
+}
 let leaderboardData = null, portfolioHistory = null, achievementsData = null, predictorTrackRecord = null, lastExtrasLoad = 0;
 let chatMessages = [], chatFilter = 'ALL', chatTimer = null;
 // Escape ALL user/server-controlled text before innerHTML injection.
@@ -1093,6 +1115,7 @@ async function tryAuth(path, body) {
     if (j.needsClaim || !j.token) {
       // PIN-less account: claim-only, no auto sign-in. Stay on auth so the
       // player can tap their name and choose SET PIN & CLAIM IT.
+      saveDeviceAccount(body.name); // created on this device — show it here
       $('auth-error').textContent = '';
       $('verify-block').classList.add('hidden');
       await loadPlayers();
@@ -1100,6 +1123,7 @@ async function tryAuth(path, body) {
       return;
     }
     token = j.token; localStorage.setItem('verityinvest-token', token);
+    saveDeviceAccount(body.name); // signed in on this device — show it here
     if (path.includes('register') && j.needsVerification) {
       if (j.codeSent) {
         $('verify-email-label').textContent = body.email; $('verify-block').classList.remove('hidden');
@@ -1133,6 +1157,7 @@ $('btn-claim').onclick = async () => {
   try {
     const j = await api('/api/auth/claim', { method: 'POST', body: JSON.stringify({ name: claimName, pin: $('claim-pin').value }) });
     token = j.token; localStorage.setItem('verityinvest-token', token);
+    saveDeviceAccount(claimName); // claimed on this device — show it here
     $('claim-block').classList.add('hidden'); enterApp();
     try { await refreshAll(); $('app-loading').classList.add('hidden'); } catch {}
   } catch (e) { $('claim-msg').textContent = e.message; }
@@ -1142,7 +1167,23 @@ async function loadPlayers() {
   try {
     const j = await api('/api/session');
     const el = $('player-list');
-    el.innerHTML = j.players.length ? '<p class="muted small">PLAYERS — tap one to fill in the name:</p>' + j.players.map(p => `<span class="player-chip ${p.has_pin ? '' : 'claim'}" data-name="${escapeHtml(p.name)}" data-haspin="${p.has_pin}">${escapeHtml(p.name)} · ${p.is_owner ? 'OWNER' : p.has_pin ? 'PLAYER' : 'NO PIN YET'}</span>`).join('') : '<p class="muted">No players yet — be the first.</p>';
+    const device = getDeviceAccounts();
+    // Default: only accounts used on this device. "Show all players" is
+    // the escape hatch for a brand-new device or an account made elsewhere.
+    const visible = showAllPlayers ? j.players : j.players.filter(p => device.some(d => d.toLowerCase() === p.name.toLowerCase()));
+    const heading = showAllPlayers
+      ? '<p class="muted small">ALL PLAYERS — tap one to fill in the name:</p>'
+      : device.length
+        ? '<p class="muted small">ACCOUNTS ON THIS DEVICE — tap one to fill in the name:</p>'
+        : '<p class="muted small">No accounts saved on this device yet — type your name + PIN below, or tap Show all players to pick one.</p>';
+    const toggleLabel = showAllPlayers ? 'Show only this device' : 'Show all players';
+    el.innerHTML = heading + (visible.length
+      ? visible.map(p => `<span class="player-chip ${p.has_pin ? '' : 'claim'}" data-name="${escapeHtml(p.name)}" data-haspin="${p.has_pin}">${escapeHtml(p.name)} · ${p.is_owner ? 'OWNER' : p.has_pin ? 'PLAYER' : 'NO PIN YET'}${!showAllPlayers ? ` <button class="chip-x" data-forget="${escapeHtml(p.name)}" title="Forget this account on this device">×</button>` : ''}</span>`).join('')
+      : (device.length || showAllPlayers ? '<p class="muted">No players yet — be the first.</p>' : ''))
+      + `<p><button class="btn small" id="btn-toggle-players">${toggleLabel}</button></p>`;
+    const tg = $('btn-toggle-players');
+    if (tg) tg.onclick = () => { showAllPlayers = !showAllPlayers; loadPlayers(); };
+    el.querySelectorAll('[data-forget]').forEach(b => b.onclick = e => { e.stopPropagation(); removeDeviceAccount(b.dataset.forget); });
     el.querySelectorAll('.player-chip').forEach(c => c.onclick = () => {
       $('auth-name').value = c.dataset.name;
       if (c.dataset.haspin === '0') {
