@@ -12,9 +12,13 @@ just runs `npm install` then `npm start` (`node server.js`).
 ## Steps (Azure portal)
 
 1. **Create a Web App**: Create → Web App → **Linux**, Runtime stack
-   **Node 22**, region near your players. Pick the **Basic B1** plan
-   (~$13/month) or higher — the Free F1 tier sleeps when idle and has no
-   Always On, so the game would keep going down.
+   **Node 24 LTS** (the version Microsoft recommends — Node 22 is close
+   to end of support, and Node 26 works too but is still in preview on
+   App Service, so stick with 24 unless you have a reason not to; if you
+   do pick 26, set the platform to 64-bit first), region near your
+   players. Pick the **Basic B1** plan (~$13/month) or higher — the Free
+   F1 tier sleeps when idle and has no Always On, so the game would keep
+   going down.
 2. **Turn on Always On**: App → Configuration → General settings →
    Always On = On. This keeps the 24/7 auto-trader and pings running.
 3. **Connect the code**: App → Deployment Center → Source = GitHub →
