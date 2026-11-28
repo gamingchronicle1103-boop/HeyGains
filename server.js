@@ -701,12 +701,20 @@ async function aiDecide(prompt) {
   try {
     // Reasoning models (gpt-5-*, o1/o3/o4-*) reject temperature and max_tokens:
     // they only accept the default temperature and use max_completion_tokens.
+    // Reasoning itself eats completion tokens, so give a generous budget and
+    // ask for minimal reasoning — these are short analyst answers, not deep
+    // research. (400 total was too small: the model could burn it all on
+    // reasoning and return no visible answer.)
     const model = process.env.AI_MODEL || 'gpt-4o-mini';
     const isReasoning = /^(gpt-5|o[134](-mini)?)/.test(model);
     const body = { model, messages: [{ role: 'user', content: prompt }] };
-    if (isReasoning) body.max_completion_tokens = 400; else { body.temperature = 0.3; body.max_tokens = 400; }
+    if (isReasoning) { body.max_completion_tokens = 2000; body.reasoning_effort = 'minimal'; }
+    else { body.temperature = 0.3; body.max_tokens = 400; }
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': key, Authorization: 'Bearer ' + key }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
-    const j = await r.json(); return j?.choices?.[0]?.message?.content || null;
+    const txt = await r.text();
+    let j = null; try { j = JSON.parse(txt); } catch { /* non-JSON error body */ }
+    if (!r.ok) { console.error('AI call failed', r.status, txt.slice(0, 300)); return null; }
+    return j?.choices?.[0]?.message?.content || null;
   } catch { return null; }
 }
 
