@@ -82,6 +82,8 @@ CREATE INDEX IF NOT EXISTS idx_nw_snapshots_user_time ON net_worth_snapshots(use
 CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, symbol TEXT, side TEXT, type TEXT, target_price REAL, shares REAL, status TEXT DEFAULT 'open', created_at INTEGER, filled_at INTEGER, fill_price REAL);
 CREATE TABLE IF NOT EXISTS predictor_ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, created_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_pred_ai_usage_user_time ON predictor_ai_usage(user_id, created_at);
+CREATE TABLE IF NOT EXISTS ai_spend (id INTEGER PRIMARY KEY AUTOINCREMENT, month TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost_usd REAL, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS idx_ai_spend_month ON ai_spend(month);
 CREATE TABLE IF NOT EXISTS pin_lockouts (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS leagues (user_id INTEGER PRIMARY KEY, tier INTEGER DEFAULT 0, week_key TEXT DEFAULT '', week_start_worth REAL, last_result TEXT DEFAULT '', last_result_kind TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS league_meta (key TEXT PRIMARY KEY, value TEXT);
@@ -694,10 +696,28 @@ function verifyCode(uid, code) {
 }
 
 // ---------- AI ----------
+// ---------- AI monthly spend cap ----------
+// Hard cap so the AI bill can't run past $100/month. Every AI call records
+// its real token usage and cost; once the current calendar month hits the
+// cap, aiDecide refuses to call and the game falls back to rules until
+// next month. Rates are gpt-5-mini list prices ($0.25/1M input, $2.00/1M
+// output incl. reasoning tokens); override the cap with AI_MONTHLY_BUDGET_USD.
+const AI_PRICE_IN_PER_M = 0.25;
+const AI_PRICE_OUT_PER_M = 2.00;
+const AI_MONTHLY_BUDGET_USD = +(process.env.AI_MONTHLY_BUDGET_USD || 100);
+function aiMonthKey() { return new Date().toISOString().slice(0, 7); } // YYYY-MM (UTC)
+function aiSpendThisMonth() {
+  try { return db.prepare(`SELECT COALESCE(SUM(cost_usd),0) total FROM ai_spend WHERE month=?`).get(aiMonthKey())?.total || 0; } catch { return 0; }
+}
+function aiRecordSpend(promptTokens, completionTokens) {
+  const cost = (promptTokens * AI_PRICE_IN_PER_M + completionTokens * AI_PRICE_OUT_PER_M) / 1e6;
+  try { db.prepare(`INSERT INTO ai_spend(month,prompt_tokens,completion_tokens,cost_usd,created_at) VALUES(?,?,?,?,?)`).run(aiMonthKey(), promptTokens, completionTokens, cost, Date.now()); } catch { /* spend tracking is best-effort */ }
+}
 function aiConfigured() { return !!(process.env.AI_API_URL && (process.env.AI_API_KEY || process.env.AZURE_OPENAI_API_KEY)); }
 async function aiDecide(prompt) {
   const url = process.env.AI_API_URL; const key = process.env.AI_API_KEY || process.env.AZURE_OPENAI_API_KEY;
   if (!url || !key) return null;
+  if (aiSpendThisMonth() >= AI_MONTHLY_BUDGET_USD) { console.error('AI monthly budget reached ($' + AI_MONTHLY_BUDGET_USD + ') — skipping AI call'); return null; }
   try {
     // Reasoning models (gpt-5-*, o1/o3/o4-*) reject temperature and max_tokens:
     // they only accept the default temperature and use max_completion_tokens.
@@ -714,7 +734,11 @@ async function aiDecide(prompt) {
     const txt = await r.text();
     let j = null; try { j = JSON.parse(txt); } catch { /* non-JSON error body */ }
     if (!r.ok) { console.error('AI call failed', r.status, txt.slice(0, 300)); return null; }
-    return j?.choices?.[0]?.message?.content || null;
+    const content = j?.choices?.[0]?.message?.content || null;
+    const u = j?.usage;
+    if (u) aiRecordSpend(u.prompt_tokens || 0, u.completion_tokens || 0);
+    else if (content) aiRecordSpend(Math.ceil(prompt.length / 4), Math.ceil(content.length / 4)); // estimate when usage is absent
+    return content;
   } catch { return null; }
 }
 
@@ -1516,7 +1540,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, app: APP_NAME, session
 // Public config — no auth needed (the welcome screen is shown before
 // sign-in). Only exposes the Discord invite URL (empty until configured)
 // plus two booleans the UI uses for its banners/badges.
-app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, donateUrl: DONATE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured() }));
+app.get('/api/config', (req, res) => res.json({ discordInviteUrl: DISCORD_INVITE_URL, donateUrl: DONATE_URL, smtpConfigured: smtpConfigured(), aiConfigured: aiConfigured(), aiSpendUsd: +aiSpendThisMonth().toFixed(4), aiBudgetUsd: AI_MONTHLY_BUDGET_USD }));
 // H6: the sign-in page needs the player list before auth, so this stays
 // public — but it no longer leaks which account is the owner (that flag
 // used to let anyone target the owner account for PIN attacks). has_pin
