@@ -699,7 +699,13 @@ async function aiDecide(prompt) {
   const url = process.env.AI_API_URL; const key = process.env.AI_API_KEY || process.env.AZURE_OPENAI_API_KEY;
   if (!url || !key) return null;
   try {
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': key, Authorization: 'Bearer ' + key }, body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 400 }), signal: AbortSignal.timeout(20000) });
+    // Reasoning models (gpt-5-*, o1/o3/o4-*) reject temperature and max_tokens:
+    // they only accept the default temperature and use max_completion_tokens.
+    const model = process.env.AI_MODEL || 'gpt-4o-mini';
+    const isReasoning = /^(gpt-5|o[134](-mini)?)/.test(model);
+    const body = { model, messages: [{ role: 'user', content: prompt }] };
+    if (isReasoning) body.max_completion_tokens = 400; else { body.temperature = 0.3; body.max_tokens = 400; }
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'api-key': key, Authorization: 'Bearer ' + key }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) });
     const j = await r.json(); return j?.choices?.[0]?.message?.content || null;
   } catch { return null; }
 }
