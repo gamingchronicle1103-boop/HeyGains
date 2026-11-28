@@ -380,6 +380,7 @@ async function fetchLiveQuotesFresh(symbols = null) {
       out[sym] = { symbol: sym, price, prevClose, regularClose: close4pm ?? prevClose, changePct: prevClose ? ((price - prevClose) / prevClose) * 100 : 0, extChangePct: (close4pm ?? prevClose) ? ((price - (close4pm ?? prevClose)) / (close4pm ?? prevClose)) * 100 : 0, source: 'live', asOf: Date.now(), lastTrade, spark, name: meta.longName || meta.shortName || NAMES[sym] || sym };
     } catch (e) {
       try {
+        if (sym.endsWith('-USD')) throw new Error('no stooq for crypto'); // Stooq has no crypto symbols (BTC-USD -> btc.us does not exist)
         const base = sym.replace('-USD', '').toLowerCase();
         const r = await fetch(`https://stooq.com/q/l/?s=${base}.us&f=sd2t2ohlcv&h&e=csv`, { signal: AbortSignal.timeout(6000) });
         const txt = await r.text();
@@ -393,8 +394,9 @@ async function fetchLiveQuotesFresh(symbols = null) {
       }
     }
   }));
-  const missingCore = TICKERS.filter(s => !out[s]);
-  if (!Object.keys(out).length || missingCore.length) throw new Error('live feed incomplete — missing: ' + (missingCore.join(',') || 'all'));
+  // Tolerate missing symbols: a caller falls back to cache for each one
+  // individually. Only throw when the feed returned nothing usable at all.
+  if (!Object.keys(out).length) throw new Error('live feed incomplete — no usable quotes');
   const now = Date.now();
   for (const sym of Object.keys(out)) {
     const q = out[sym];
@@ -623,29 +625,34 @@ async function sendEmail(to, subject, body) {
   try { await m.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, text: body }); return { sent: true }; }
   catch (e) { return { sent: false, reason: e.message }; }
 }
+let emailFlushing = false; // in-flight guard: the 5-min interval and the 30 s server cycle must never flush the same queue twice
 async function flushEmailQueue() {
-  // Only pick up emails whose retry time has come (attempts < 3 stay queued
-  // with a next_attempt_at at least 5 min out — a send failure never
-  // permanently fails an email on the first try).
-  const rows = db.prepare("SELECT * FROM email_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at").all(Date.now());
-  const byUser = {};
-  for (const r of rows) (byUser[r.user_id] ||= []).push(r);
-  for (const [uid, items] of Object.entries(byUser)) {
-    const user = db.prepare('SELECT * FROM users WHERE id=?').get(+uid);
-    if (!user?.email || !user.email_verified) { for (const it of items) db.prepare("UPDATE email_queue SET status='not-verified' WHERE id=?").run(it.id); continue; }
-    for (let i = 0; i < items.length; i += 20) { // batched, max 20 per email
-      const batch = items.slice(i, i + 20);
-      const subject = batch.length > 1 ? `${APP_NAME}: ${batch.length} alerts` : batch[0].subject;
-      const body = batch.map(x => `• ${x.subject}\n${x.body}`).join('\n\n');
-      const res = await sendEmail(user.email, subject, body);
-      for (const it of batch) {
-        if (res.sent) { db.prepare("UPDATE email_queue SET status='sent' WHERE id=?").run(it.id); continue; }
-        const attempts = (it.attempts || 0) + 1;
-        if (attempts >= 3) db.prepare('UPDATE email_queue SET status=?, attempts=? WHERE id=?').run('failed: ' + res.reason, attempts, it.id);
-        else db.prepare('UPDATE email_queue SET attempts=?, next_attempt_at=? WHERE id=?').run(attempts, Date.now() + attempts * 5 * 60 * 1000, it.id); // retry in 5/10 min, still queued
+  if (emailFlushing) return;
+  emailFlushing = true;
+  try {
+    // Only pick up emails whose retry time has come (attempts < 3 stay queued
+    // with a next_attempt_at at least 5 min out — a send failure never
+    // permanently fails an email on the first try).
+    const rows = db.prepare("SELECT * FROM email_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at").all(Date.now());
+    const byUser = {};
+    for (const r of rows) (byUser[r.user_id] ||= []).push(r);
+    for (const [uid, items] of Object.entries(byUser)) {
+      const user = db.prepare('SELECT * FROM users WHERE id=?').get(+uid);
+      if (!user?.email || !user.email_verified) { for (const it of items) db.prepare("UPDATE email_queue SET status='not-verified' WHERE id=?").run(it.id); continue; }
+      for (let i = 0; i < items.length; i += 20) { // batched, max 20 per email
+        const batch = items.slice(i, i + 20);
+        const subject = batch.length > 1 ? `${APP_NAME}: ${batch.length} alerts` : batch[0].subject;
+        const body = batch.map(x => `• ${x.subject}\n${x.body}`).join('\n\n');
+        const res = await sendEmail(user.email, subject, body);
+        for (const it of batch) {
+          if (res.sent) { db.prepare("UPDATE email_queue SET status='sent' WHERE id=?").run(it.id); continue; }
+          const attempts = (it.attempts || 0) + 1;
+          if (attempts >= 3) db.prepare('UPDATE email_queue SET status=?, attempts=? WHERE id=?').run('failed: ' + res.reason, attempts, it.id);
+          else db.prepare('UPDATE email_queue SET attempts=?, next_attempt_at=? WHERE id=?').run(attempts, Date.now() + attempts * 5 * 60 * 1000, it.id); // retry in 5/10 min, still queued
+        }
       }
     }
-  }
+  } finally { emailFlushing = false; }
 }
 setInterval(() => { flushEmailQueue().catch(() => {}); }, 5 * 60 * 1000);
 function queueEmail(uid, subject, body) {
@@ -674,10 +681,12 @@ async function sendVerificationCode(uid, email) {
   const code = makeCode();
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.createHash('sha256').update(salt + ':' + code).digest('hex');
-  db.prepare('INSERT INTO email_verifications(user_id,email,code_hash,salt,created_at,expires_at) VALUES(?,?,?,?,?,?)').run(uid, email, hash, salt, Date.now(), Date.now() + 10 * 60 * 1000);
-  db.prepare('UPDATE users SET pending_email=? WHERE id=?').run(email, uid);
   const res = await sendEmail(email, `${APP_NAME} — your verification code`, `Your ${APP_NAME} verification code is: ${code}\n\nIt expires in 10 minutes. If you didn't ask for this, ignore this email.`);
   if (!res.sent) return { ok: false, error: 'Could not send the code: ' + res.reason, smtpConfigured: true };
+  // Only record the code once the email actually went out — a failed send
+  // must not count toward the 3-per-hour / 60-second rate limits.
+  db.prepare('INSERT INTO email_verifications(user_id,email,code_hash,salt,created_at,expires_at) VALUES(?,?,?,?,?,?)').run(uid, email, hash, salt, Date.now(), Date.now() + 10 * 60 * 1000);
+  db.prepare('UPDATE users SET pending_email=? WHERE id=?').run(email, uid);
   return { ok: true, email, expiresInMinutes: 10 };
 }
 function verifyCode(uid, code) {
@@ -739,7 +748,7 @@ async function aiDecide(prompt) {
     if (u) aiRecordSpend(u.prompt_tokens || 0, u.completion_tokens || 0);
     else if (content) aiRecordSpend(Math.ceil(prompt.length / 4), Math.ceil(content.length / 4)); // estimate when usage is absent
     return content;
-  } catch { return null; }
+  } catch (e) { console.error('AI call error', e.message); return null; }
 }
 
 // ---------- Trading helpers ----------
@@ -880,9 +889,13 @@ function evaluatePings(uid, quotes) {
     const chg = isShort ? ((p.avg_cost - q.price) / p.avg_cost) * 100 : ((q.price - p.avg_cost) / p.avg_cost) * 100;
     const heldLabel = isShort ? `you're short ${Math.abs(p.shares)} shares` : `you're holding ${p.shares} shares`;
     // Sell/short warns only fire while the position is still ABOVE its
-    // stop line — once the stop ping has fired, the warn is noise.
-    if (s.sellPings !== false && !isShort && q.changePct <= -4 && chg > style.stop) addAlert(uid, p.symbol, 'SELL WATCH', `SELL WATCH — ${p.symbol} dropping hard today — You hold ${p.symbol} and it's down ${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)}. Worth a look before it reaches your stop.`, q.price);
-    if (s.sellPings !== false && isShort && q.changePct >= 4 && chg > style.stop) addAlert(uid, p.symbol, 'SHORT WATCH', `SHORT WATCH — ${p.symbol} ripping against your short — ${p.symbol} is up +${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)} — rising against your short (${heldLabel}). Worth a look before it reaches your stop.`, q.price);
+    // stop line — once the stop ping has fired, the warn is noise. The
+    // warn fires ~80% of the way to the style's stop (-4% for Day's -5%
+    // stop, -1.6% for Scalping's -2%, -6.4% for Swing's -8%, -9.6% for
+    // Position's -12%).
+    const watchPct = style.stop * 0.8;
+    if (s.sellPings !== false && !isShort && q.changePct <= watchPct && chg > style.stop) addAlert(uid, p.symbol, 'SELL WATCH', `SELL WATCH — ${p.symbol} dropping hard today — You hold ${p.symbol} and it's down ${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)}. Worth a look before it reaches your stop.`, q.price);
+    if (s.sellPings !== false && isShort && q.changePct >= -watchPct && chg > style.stop) addAlert(uid, p.symbol, 'SHORT WATCH', `SHORT WATCH — ${p.symbol} ripping against your short — ${p.symbol} is up +${q.changePct.toFixed(2)}% today at $${q.price.toFixed(2)} — rising against your short (${heldLabel}). Worth a look before it reaches your stop.`, q.price);
     if (s.stopTargetPings !== false) {
       // One line only: the style's own stop/target. The old code also fired
       // hardcoded -5%/+10% lines under the same SELL·STOP / SELL·TARGET
@@ -936,190 +949,195 @@ async function researchPass(sym, quotes, styleKey = 'day') {
   const score = Math.max(0, Math.min(100, Math.round(50 + near * 2 + far + Math.min(3, headlines.length) * 2)));
   return { trend, stats, headlines, score };
 }
+const autoRunning = new Set(); // user ids with an auto cycle currently in flight
 async function runAutoCycle(uid, { manual = false, quotes: presetQuotes = null } = {}) {
-  const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
-  if (!user) return { ran: false };
-  const s = effectiveSettings(uid, user);
-  const saver = !!s.creditSaver;
-  const styleKey = s.style in STYLES ? s.style : 'day';
-  const style = STYLES[styleKey];
-  const setLA = text => setLastAction(uid, text);
-  const latestLogKind = () => db.prepare('SELECT kind FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1').get(uid)?.kind || null;
-  // A routine "checked" row is only logged when the latest log entry
-  // isn't already one — otherwise every 30 s check floods the log with
-  // identical rows.
-  const logCheckDeduped = msg => { if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', msg); };
-  // Credit Saver blocks ALL auto trading outside market hours — including a
-  // manual "Run a Check Now". The old !manual exemption let a manual run
-  // trade after the early close while Saver was on, which is exactly what
-  // the Saver is supposed to prevent. No log row for this: the status line
-  // says why, and the next due check picks trading back up.
-  if (saver && !isMarketHours()) { setLA('Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no AI runs while it\'s closed.'); return { ran: true, action: 'waiting-market-hours' }; }
-  let rawQuotes;
-  try { rawQuotes = presetQuotes || await fetchLiveQuotes(boardSymbols(uid).all); }
-  catch { rawQuotes = cachedQuotes(); }
-  if (!rawQuotes || !Object.keys(rawQuotes).length) { setLA('Waiting for the first live quotes…'); return { ran: true, action: 'waiting-quotes' }; }
-  const quotes = effectiveQuotesFor(uid, rawQuotes);
-  evaluatePings(uid, quotes);
-  // A manual "Run a check now" does nothing while auto trading is off —
-  // the cycle returns false when disabled, so a manual click never trades
-  // behind the player's back. The old code ran a full cycle (trades
-  // included) on a manual click even with auto off.
-  if (!s.autoOn) { setLA('Auto trading is off — flip it on and Verity AI starts watching the tape.'); return { ran: true, action: 'auto-off' }; }
-  let lastAction = '';
-  // 1) Exits — at the chosen style's stop / target lines. EVERY position
-  // sitting on its line exits this cycle — exits are risk control, not new
-  // trades, so the daily entry cap never leaves one stranded.
-  if (s.autoSell !== false) for (const p of positionsOf(uid)) {
-    const q = quotes[p.symbol]; if (!q) continue;
-    // Gain vs cost — flipped for shorts, so the same stop/target lines
-    // work: a short exits when the price rises past its stop or falls to
-    // its target. Exiting a short means BUYING to cover, not selling.
-    const isShort = p.shares < 0;
-    const chg = isShort ? ((p.avg_cost - q.price) / p.avg_cost) * 100 : ((q.price - p.avg_cost) / p.avg_cost) * 100;
-    if (chg <= style.stop || chg >= style.target) {
-      const isStop = chg <= style.stop;
-      const line = isStop ? `${style.stop}% stop` : `+${style.target}% target`;
-      const done = applyTrade(uid, p.symbol, isShort ? 'buy' : 'sell', Math.abs(p.shares), q.price, 'auto-' + styleKey);
-      if (done.error) continue; // position changed mid-cycle — skip it
-      const pnl = done.pnl ?? 0;
-      const sharesOut = Math.abs(p.shares);
-      logAuto(uid, 'SELL', `${isShort ? 'AUTO COVER' : 'AUTO SELL'} — ${p.symbol} hit the ${style.label} ${line} — ${isShort ? 'Covered' : 'Sold'} all ${sharesOut} sh @ $${q.price.toFixed(2)} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% vs your $${p.avg_cost.toFixed(2)} ${isShort ? 'short avg' : 'avg'}) for $${(sharesOut * q.price).toFixed(2)}. Realized P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}. ${style.label} style ${isStop ? 'stop-loss' : 'take-profit'} line, executed by the auto trader.`, { symbol: p.symbol, shares: sharesOut, price: q.price });
-      if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-${isShort ? 'cover' : 'sell'}: ${p.symbol}`, `${isShort ? 'Covered short' : 'Sold'} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
-      lastAction = `${isShort ? 'Covered' : 'Sold'} ${p.symbol} at the ${style.label} ${line}`;
-    }
-  }
-  // Exits count toward today's trades too — refresh the entry budget now
-  // that this cycle's exits are on the log. Exits must not block entries:
-  // if the cap still allows a buy after the exits, this cycle buys.
-  const et = etDate();
-  const [dayStart, dayEnd] = etDayBounds(et.year, et.month, et.day);
-  const tradesTodayNow = () => db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND source LIKE 'auto%' AND created_at>=? AND created_at<?").get(uid, dayStart, dayEnd).c;
-  const tradesLeft = s.maxTradesPerDay - tradesTodayNow();
-  // 2) Candidates — the signals depend on the style. Scalping reads the
-  // intraday bars; swing / position read daily closes for every non-held
-  // ticker; day trading uses today's move (the Pings lines). Entries stay
-  // on the core 12 and never on a ticker already held.
-  if (tradesLeft > 0 && (s.buyDips !== false || s.buyMomentum !== false)) {
-    const heldRows = positionsOf(uid);
-    const held = new Set(heldRows.map(p => p.symbol));
-    if (heldRows.length < s.maxPositions) {
-      const signals = [];
-      const pushSig = (sym, signal, strength, kind, chg) => signals.push({ sym, signal, score: strength, kind, chg });
-      if (styleKey === 'scalping') {
-        for (const sym of TICKERS) {
-          if (held.has(sym)) continue;
-          const q = quotes[sym]; if (!q || !q.price) continue;
-          let closes = [];
-          try { const h = await fetchHistory(sym, '1D'); closes = h.points.filter(p => !p.f).map(p => p.c); } catch {}
-          const m15 = pctOver(closes, 15);
-          if (m15 == null) continue;
-          if (s.buyMomentum !== false && m15 >= 0.5) pushSig(sym, `intraday burst ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'momentum', m15);
-          else if (s.buyDips !== false && m15 <= -0.6) pushSig(sym, `intraday dip ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'dip', m15);
-        }
-      } else if (styleKey === 'swing' || styleKey === 'position') {
-        const unheld = TICKERS.filter(sym => !held.has(sym));
-        const settled = await Promise.allSettled(unheld.map(async sym => ({ sym, h: await fetchHistory(sym, '1M') })));
-        for (const r of settled) {
-          if (r.status !== 'fulfilled') continue;
-          const { sym, h } = r.value;
-          const q = quotes[sym]; if (!q || !q.price) continue;
-          const closes = h.points.map(p => p.c);
-          const c5 = pctOver(closes, 5), c20 = pctOver(closes, 20), c60 = pctOver(closes, 60);
-          if (styleKey === 'swing') {
-            if (s.buyDips !== false && c5 != null && c5 <= -5 && c20 != null && c20 >= 0) pushSig(sym, `pullback ${fmtSignedPct(c5)} / 5 sessions inside a ${fmtSignedPct(c20)} / 20-session uptrend`, Math.abs(c5) + Math.abs(c20), 'dip', c5);
-            else if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c5 != null && c5 >= 0) pushSig(sym, `trend breakout ${fmtSignedPct(c20)} / 20 sessions`, Math.abs(c20), 'momentum', c20);
-          } else {
-            if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c60 != null && c60 >= 0) pushSig(sym, `long-trend strength ${fmtSignedPct(c20)} / 20 · ${fmtSignedPct(c60)} / ~60 sessions`, Math.abs(c20) + Math.abs(c60), 'momentum', c20);
-            else if (s.buyDips !== false && c20 != null && c20 <= -10 && c60 != null && c60 >= 0) pushSig(sym, `deep pullback ${fmtSignedPct(c20)} / 20 sessions in a ${fmtSignedPct(c60)} long uptrend`, Math.abs(c20), 'dip', c20);
-          }
-        }
-      } else {
-        for (const sym of TICKERS) {
-          if (held.has(sym)) continue;
-          const q = quotes[sym]; if (!q) continue;
-          if (s.buyDips !== false && q.changePct <= s.dipPct) pushSig(sym, `dip ${q.changePct.toFixed(2)}% today`, Math.abs(q.changePct), 'dip', q.changePct);
-          else if (s.buyMomentum !== false && q.changePct >= s.momentumPct) pushSig(sym, `momentum +${q.changePct.toFixed(2)}% today`, q.changePct, 'momentum', q.changePct);
-        }
+  if (autoRunning.has(uid)) return { ran: false }; // a cycle for this user is already running (manual Run now vs the 30 s cycle)
+  autoRunning.add(uid);
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
+    if (!user) return { ran: false };
+    const s = effectiveSettings(uid, user);
+    const saver = !!s.creditSaver;
+    const styleKey = s.style in STYLES ? s.style : 'day';
+    const style = STYLES[styleKey];
+    const setLA = text => setLastAction(uid, text);
+    const latestLogKind = () => db.prepare('SELECT kind FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 1').get(uid)?.kind || null;
+    // A routine "checked" row is only logged when the latest log entry
+    // isn't already one — otherwise every 30 s check floods the log with
+    // identical rows.
+    const logCheckDeduped = msg => { if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', msg); };
+    // Credit Saver blocks ALL auto trading outside market hours — including a
+    // manual "Run a Check Now". The old !manual exemption let a manual run
+    // trade after the early close while Saver was on, which is exactly what
+    // the Saver is supposed to prevent. No log row for this: the status line
+    // says why, and the next due check picks trading back up.
+    if (saver && !isMarketHours()) { setLA('Credit Saver — market closed (' + marketSession() + '). Waiting for market hours (9:30 AM–4:00 PM ET); no AI runs while it\'s closed.'); return { ran: true, action: 'waiting-market-hours' }; }
+    let rawQuotes;
+    try { rawQuotes = presetQuotes || await fetchLiveQuotes(boardSymbols(uid).all); }
+    catch { rawQuotes = cachedQuotes(); }
+    if (!rawQuotes || !Object.keys(rawQuotes).length) { setLA('Waiting for the first live quotes…'); return { ran: true, action: 'waiting-quotes' }; }
+    const quotes = effectiveQuotesFor(uid, rawQuotes);
+    evaluatePings(uid, quotes);
+    // A manual "Run a check now" does nothing while auto trading is off —
+    // the cycle returns false when disabled, so a manual click never trades
+    // behind the player's back. The old code ran a full cycle (trades
+    // included) on a manual click even with auto off.
+    if (!s.autoOn) { setLA('Auto trading is off — flip it on and Verity AI starts watching the tape.'); return { ran: true, action: 'auto-off' }; }
+    let lastAction = '';
+    // 1) Exits — at the chosen style's stop / target lines. EVERY position
+    // sitting on its line exits this cycle — exits are risk control, not new
+    // trades, so the daily entry cap never leaves one stranded.
+    if (s.autoSell !== false) for (const p of positionsOf(uid)) {
+      const q = quotes[p.symbol]; if (!q) continue;
+      // Gain vs cost — flipped for shorts, so the same stop/target lines
+      // work: a short exits when the price rises past its stop or falls to
+      // its target. Exiting a short means BUYING to cover, not selling.
+      const isShort = p.shares < 0;
+      const chg = isShort ? ((p.avg_cost - q.price) / p.avg_cost) * 100 : ((q.price - p.avg_cost) / p.avg_cost) * 100;
+      if (chg <= style.stop || chg >= style.target) {
+        const isStop = chg <= style.stop;
+        const line = isStop ? `${style.stop}% stop` : `+${style.target}% target`;
+        const done = applyTrade(uid, p.symbol, isShort ? 'buy' : 'sell', Math.abs(p.shares), q.price, 'auto-' + styleKey);
+        if (done.error) continue; // position changed mid-cycle — skip it
+        const pnl = done.pnl ?? 0;
+        const sharesOut = Math.abs(p.shares);
+        logAuto(uid, 'SELL', `${isShort ? 'AUTO COVER' : 'AUTO SELL'} — ${p.symbol} hit the ${style.label} ${line} — ${isShort ? 'Covered' : 'Sold'} all ${sharesOut} sh @ $${q.price.toFixed(2)} (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% vs your $${p.avg_cost.toFixed(2)} ${isShort ? 'short avg' : 'avg'}) for $${(sharesOut * q.price).toFixed(2)}. Realized P&L ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}. ${style.label} style ${isStop ? 'stop-loss' : 'take-profit'} line, executed by the auto trader.`, { symbol: p.symbol, shares: sharesOut, price: q.price });
+        if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-${isShort ? 'cover' : 'sell'}: ${p.symbol}`, `${isShort ? 'Covered short' : 'Sold'} ${p.symbol} @ $${q.price} (${chg.toFixed(1)}%).`);
+        lastAction = `${isShort ? 'Covered' : 'Sold'} ${p.symbol} at the ${style.label} ${line}`;
       }
-      const gameNow = getGame(uid);
-      if (signals.length > 0 && gameNow.cash > 0) {
-        // 3) Research pass — news + trend stats, logged as ONE entry
-        // before any decision so the reasoning is on the record. With
-        // Credit Saver in effect only the single strongest signal is
-        // researched — every other check is rules-only and never touches
-        // the AI or the news search; with the owner's saver off, up to
-        // four candidates get the full pass.
-        const shortlist = [...signals].sort((a, b) => b.score - a.score).slice(0, saver ? 1 : 4);
-        const research = new Map();
-        for (const c of shortlist) {
-          try { research.set(c.sym, await researchPass(c.sym, quotes, styleKey)); } catch { /* research is best-effort per name */ }
-        }
-        if (research.size > 0) {
-          const lines = shortlist.filter(c => research.has(c.sym)).map(c => {
-            const r = research.get(c.sym);
-            return `${c.sym}: research score ${r?.score ?? 0}/100 — ${r?.stats ?? ''}${r?.headlines?.length ? ` · news: ${r.headlines.join(' · ')}` : ' · news: nothing fresh found'}`;
-          });
-          logAuto(uid, 'RESEARCH', `RESEARCH — ${style.label} pass on ${[...research.keys()].join(', ')} — ${lines.join(' | ')}`);
-        }
-        const researchText = c => {
-          const r = research.get(c.sym);
-          return r ? `score ${r.score}/100 · ${r.stats}${r.headlines?.length ? `; news: ${r.headlines.join(' · ')}` : '; no fresh news found'}` : 'research unavailable';
-        };
-        // 4) Decision — AI reads the research, or rules take the
-        // strongest research score. AI mode with no AI available falls
-        // back to rules (the standalone has no guaranteed AI key).
-        let pick = null, reason = '';
-        if (s.autoMode === 'ai') {
-          const tape = shortlist.map(c => `${c.sym} (${NAMES[c.sym] || c.sym}): $${quotes[c.sym].price.toFixed(2)} — signal: ${c.signal} — research: ${researchText(c)}`).join('\n');
-          const heldText = heldRows.length > 0 ? heldRows.map(p => `${p.symbol} ${p.shares} sh @ $${p.avg_cost.toFixed(2)}`).join(', ') : 'none';
-          const prompt = `You are the auto trader inside a paper-trading simulator ($100K fake cash, real live prices). The player turned you ON, picked the ${style.label} style, and gave you these rules: at most $${s.budgetPerBuy.toFixed(0)} per buy, at most ${s.maxPositions} open positions, typical hold ${style.hold}.${saver ? ' Credit Saver is ON: cheap rules checks run every 30 seconds and you are woken ONLY when a real signal fires during market hours, to keep AI usage low — be selective, passing costs nothing and there are at most 2 auto trades today.' : ''}\n\n${style.brief}\n\nYou already ran a research pass on the ${shortlist.length} strongest signal(s) — fresh news headlines and trend stats are included below. Weigh the RESEARCH, not just the raw signal: bad fresh news or a trend fighting the signal is a reason to pass. Pick the SINGLE best one to buy right now, or pass if none of them look worth it — passing is a real option, don't force a trade. Give a one or two sentence reason the player will read in the activity log, and cite the research (a trend number or a headline) that decided it.\n\nSIGNALS + RESEARCH:\n${tape}\n\nCash available: $${gameNow.cash.toFixed(2)}. Currently holding: ${heldText}.\n\nAnswer ONLY with BUY <SYMBOL> or PASS and one short reason.`;
-          const ai = await aiDecide(prompt);
-          if (ai) {
-            const m = ai.match(/BUY\s+([A-Z][A-Z0-9-]*)/i);
-            if (m && shortlist.some(c => c.sym === m[1].toUpperCase())) { pick = shortlist.find(c => c.sym === m[1].toUpperCase()); reason = 'Verity AI: ' + ai.slice(0, 200); }
-            else if (/^\s*BUY/i.test(ai)) { pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null; reason = 'Verity AI: ' + ai.slice(0, 200); }
-            else reason = 'Verity AI: ' + ai.slice(0, 200);
-          } else {
-            pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
-            if (pick) reason = `AI unavailable (no AI key configured) — rules fallback: strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
+    }
+    // Exits count toward today's trades too — refresh the entry budget now
+    // that this cycle's exits are on the log. Exits must not block entries:
+    // if the cap still allows a buy after the exits, this cycle buys.
+    const et = etDate();
+    const [dayStart, dayEnd] = etDayBounds(et.year, et.month, et.day);
+    const tradesTodayNow = () => db.prepare("SELECT COUNT(*) c FROM trades WHERE user_id=? AND source LIKE 'auto%' AND created_at>=? AND created_at<?").get(uid, dayStart, dayEnd).c;
+    const tradesLeft = s.maxTradesPerDay - tradesTodayNow();
+    // 2) Candidates — the signals depend on the style. Scalping reads the
+    // intraday bars; swing / position read daily closes for every non-held
+    // ticker; day trading uses today's move (the Pings lines). Entries stay
+    // on the core 12 and never on a ticker already held.
+    if (tradesLeft > 0 && (s.buyDips !== false || s.buyMomentum !== false)) {
+      const heldRows = positionsOf(uid);
+      const held = new Set(heldRows.map(p => p.symbol));
+      if (heldRows.length < s.maxPositions) {
+        const signals = [];
+        const pushSig = (sym, signal, strength, kind, chg) => signals.push({ sym, signal, score: strength, kind, chg });
+        if (styleKey === 'scalping') {
+          for (const sym of TICKERS) {
+            if (held.has(sym)) continue;
+            const q = quotes[sym]; if (!q || !q.price) continue;
+            let closes = [];
+            try { const h = await fetchHistory(sym, '1D'); closes = h.points.filter(p => !p.f).map(p => p.c); } catch {}
+            const m15 = pctOver(closes, 15);
+            if (m15 == null) continue;
+            if (s.buyMomentum !== false && m15 >= 0.5) pushSig(sym, `intraday burst ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'momentum', m15);
+            else if (s.buyDips !== false && m15 <= -0.6) pushSig(sym, `intraday dip ${fmtSignedPct(m15)} in 15m`, Math.abs(m15), 'dip', m15);
           }
-        }
-        if (!pick && s.autoMode === 'rules') {
-          pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
-          if (pick) reason = `Strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
-        }
-        if (pick) {
-          const q = quotes[pick.sym];
-          // Size to what the player can actually afford: the budget or
-          // 95% of their cash, whichever is smaller — an account with less
-          // cash than the budget used to fail every check with "not
-          // enough cash" forever.
-          const budget = Math.min(s.budgetPerBuy, gameNow.cash * 0.95);
-          const shares = Math.max(0.01, Math.floor((budget / q.price) * 100) / 100);
-          if (shares * q.price < 0.01) { logCheckDeduped(`Checked — no trade — not enough cash for even 0.01 shares of ${pick.sym}`); lastAction = 'Checked — no trade'; }
-          else {
-            const r = applyTrade(uid, pick.sym, 'buy', shares, q.price, 'auto-' + styleKey);
-            if (r.error) { logCheckDeduped(`Checked — no trade — ${r.error}`); lastAction = 'Checked — no trade'; }
-            else {
-              logAuto(uid, 'BUY', `AUTO BUY — ${pick.sym} (${pick.signal}) — Bought ${shares} sh @ $${q.price.toFixed(2)} for $${(shares * q.price).toFixed(2)} of paper cash. ${reason} Research: ${researchText(pick)}. ${style.label} guardrails on it now: auto-sell at $${(q.price * (1 + style.stop / 100)).toFixed(2)} (${style.stop}%) or $${(q.price * (1 + style.target / 100)).toFixed(2)} (+${style.target}%).`, { symbol: pick.sym, shares, price: q.price });
-              if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-buy: ${pick.sym}`, `Bought ${shares} ${pick.sym} @ $${q.price}. ${reason}`);
-              lastAction = `Bought ${pick.sym} — ${pick.signal}`;
+        } else if (styleKey === 'swing' || styleKey === 'position') {
+          const unheld = TICKERS.filter(sym => !held.has(sym));
+          const settled = await Promise.allSettled(unheld.map(async sym => ({ sym, h: await fetchHistory(sym, '1M') })));
+          for (const r of settled) {
+            if (r.status !== 'fulfilled') continue;
+            const { sym, h } = r.value;
+            const q = quotes[sym]; if (!q || !q.price) continue;
+            const closes = h.points.map(p => p.c);
+            const c5 = pctOver(closes, 5), c20 = pctOver(closes, 20), c60 = pctOver(closes, 60);
+            if (styleKey === 'swing') {
+              if (s.buyDips !== false && c5 != null && c5 <= -5 && c20 != null && c20 >= 0) pushSig(sym, `pullback ${fmtSignedPct(c5)} / 5 sessions inside a ${fmtSignedPct(c20)} / 20-session uptrend`, Math.abs(c5) + Math.abs(c20), 'dip', c5);
+              else if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c5 != null && c5 >= 0) pushSig(sym, `trend breakout ${fmtSignedPct(c20)} / 20 sessions`, Math.abs(c20), 'momentum', c20);
+            } else {
+              if (s.buyMomentum !== false && c20 != null && c20 >= 5 && c60 != null && c60 >= 0) pushSig(sym, `long-trend strength ${fmtSignedPct(c20)} / 20 · ${fmtSignedPct(c60)} / ~60 sessions`, Math.abs(c20) + Math.abs(c60), 'momentum', c20);
+              else if (s.buyDips !== false && c20 != null && c20 <= -10 && c60 != null && c60 >= 0) pushSig(sym, `deep pullback ${fmtSignedPct(c20)} / 20 sessions in a ${fmtSignedPct(c60)} long uptrend`, Math.abs(c20), 'dip', c20);
             }
           }
-        } else if (reason) {
-          lastAction = `Researched ${shortlist.map(c => c.sym).join(', ')} — passed`;
-          if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', `Checked — passed after research — ${shortlist.map(c => `${c.sym} (${c.signal})`).join(', ')} flashed and got researched, but the auto trader passed. ${reason}`);
+        } else {
+          for (const sym of TICKERS) {
+            if (held.has(sym)) continue;
+            const q = quotes[sym]; if (!q) continue;
+            if (s.buyDips !== false && q.changePct <= s.dipPct) pushSig(sym, `dip ${q.changePct.toFixed(2)}% today`, Math.abs(q.changePct), 'dip', q.changePct);
+            else if (s.buyMomentum !== false && q.changePct >= s.momentumPct) pushSig(sym, `momentum +${q.changePct.toFixed(2)}% today`, q.changePct, 'momentum', q.changePct);
+          }
+        }
+        const gameNow = getGame(uid);
+        if (signals.length > 0 && gameNow.cash > 0) {
+          // 3) Research pass — news + trend stats, logged as ONE entry
+          // before any decision so the reasoning is on the record. With
+          // Credit Saver in effect only the single strongest signal is
+          // researched — every other check is rules-only and never touches
+          // the AI or the news search; with the owner's saver off, up to
+          // four candidates get the full pass.
+          const shortlist = [...signals].sort((a, b) => b.score - a.score).slice(0, saver ? 1 : 4);
+          const research = new Map();
+          for (const c of shortlist) {
+            try { research.set(c.sym, await researchPass(c.sym, quotes, styleKey)); } catch { /* research is best-effort per name */ }
+          }
+          if (research.size > 0) {
+            const lines = shortlist.filter(c => research.has(c.sym)).map(c => {
+              const r = research.get(c.sym);
+              return `${c.sym}: research score ${r?.score ?? 0}/100 — ${r?.stats ?? ''}${r?.headlines?.length ? ` · news: ${r.headlines.join(' · ')}` : ' · news: nothing fresh found'}`;
+            });
+            logAuto(uid, 'RESEARCH', `RESEARCH — ${style.label} pass on ${[...research.keys()].join(', ')} — ${lines.join(' | ')}`);
+          }
+          const researchText = c => {
+            const r = research.get(c.sym);
+            return r ? `score ${r.score}/100 · ${r.stats}${r.headlines?.length ? `; news: ${r.headlines.join(' · ')}` : '; no fresh news found'}` : 'research unavailable';
+          };
+          // 4) Decision — AI reads the research, or rules take the
+          // strongest research score. AI mode with no AI available falls
+          // back to rules (the standalone has no guaranteed AI key).
+          let pick = null, reason = '';
+          if (s.autoMode === 'ai') {
+            const tape = shortlist.map(c => `${c.sym} (${NAMES[c.sym] || c.sym}): $${quotes[c.sym].price.toFixed(2)} — signal: ${c.signal} — research: ${researchText(c)}`).join('\n');
+            const heldText = heldRows.length > 0 ? heldRows.map(p => `${p.symbol} ${p.shares} sh @ $${p.avg_cost.toFixed(2)}`).join(', ') : 'none';
+            const prompt = `You are the auto trader inside a paper-trading simulator ($100K fake cash, real live prices). The player turned you ON, picked the ${style.label} style, and gave you these rules: at most $${s.budgetPerBuy.toFixed(0)} per buy, at most ${s.maxPositions} open positions, typical hold ${style.hold}.${saver ? ' Credit Saver is ON: cheap rules checks run every 30 seconds and you are woken ONLY when a real signal fires during market hours, to keep AI usage low — be selective, passing costs nothing and there are at most 2 auto trades today.' : ''}\n\n${style.brief}\n\nYou already ran a research pass on the ${shortlist.length} strongest signal(s) — fresh news headlines and trend stats are included below. Weigh the RESEARCH, not just the raw signal: bad fresh news or a trend fighting the signal is a reason to pass. Pick the SINGLE best one to buy right now, or pass if none of them look worth it — passing is a real option, don't force a trade. Give a one or two sentence reason the player will read in the activity log, and cite the research (a trend number or a headline) that decided it.\n\nSIGNALS + RESEARCH:\n${tape}\n\nCash available: $${gameNow.cash.toFixed(2)}. Currently holding: ${heldText}.\n\nAnswer ONLY with BUY <SYMBOL> or PASS and one short reason.`;
+            const ai = await aiDecide(prompt);
+            if (ai) {
+              const m = ai.match(/BUY\s+([A-Z][A-Z0-9-]*)/i);
+              if (m && shortlist.some(c => c.sym === m[1].toUpperCase())) { pick = shortlist.find(c => c.sym === m[1].toUpperCase()); reason = 'Verity AI: ' + ai.slice(0, 200); }
+              else if (/^\s*BUY/i.test(ai)) { pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null; reason = 'Verity AI: ' + ai.slice(0, 200); }
+              else reason = 'Verity AI: ' + ai.slice(0, 200);
+            } else {
+              pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
+              if (pick) reason = aiConfigured() ? `AI call failed — rules fallback: strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.` : `AI unavailable (no AI key configured) — rules fallback: strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
+            }
+          }
+          if (!pick && s.autoMode === 'rules') {
+            pick = [...shortlist].sort((a, b) => (research.get(b.sym)?.score ?? 0) - (research.get(a.sym)?.score ?? 0))[0] ?? null;
+            if (pick) reason = `Strongest research score in ${style.label} mode: ${pick.signal}. Research: ${researchText(pick)}.`;
+          }
+          if (pick) {
+            const q = quotes[pick.sym];
+            // Size to what the player can actually afford: the budget or
+            // 95% of their cash, whichever is smaller — an account with less
+            // cash than the budget used to fail every check with "not
+            // enough cash" forever.
+            const budget = Math.min(s.budgetPerBuy, gameNow.cash * 0.95);
+            const shares = Math.max(0.01, Math.floor((budget / q.price) * 100) / 100);
+            if (shares * q.price < 0.01) { logCheckDeduped(`Checked — no trade — not enough cash for even 0.01 shares of ${pick.sym}`); lastAction = 'Checked — no trade'; }
+            else {
+              const r = applyTrade(uid, pick.sym, 'buy', shares, q.price, 'auto-' + styleKey);
+              if (r.error) { logCheckDeduped(`Checked — no trade — ${r.error}`); lastAction = 'Checked — no trade'; }
+              else {
+                logAuto(uid, 'BUY', `AUTO BUY — ${pick.sym} (${pick.signal}) — Bought ${shares} sh @ $${q.price.toFixed(2)} for $${(shares * q.price).toFixed(2)} of paper cash. ${reason} Research: ${researchText(pick)}. ${style.label} guardrails on it now: auto-sell at $${(q.price * (1 + style.stop / 100)).toFixed(2)} (${style.stop}%) or $${(q.price * (1 + style.target / 100)).toFixed(2)} (+${style.target}%).`, { symbol: pick.sym, shares, price: q.price });
+                if (s.emailTrades) queueEmail(uid, `${APP_NAME} auto-buy: ${pick.sym}`, `Bought ${shares} ${pick.sym} @ $${q.price}. ${reason}`);
+                lastAction = `Bought ${pick.sym} — ${pick.signal}`;
+              }
+            }
+          } else if (reason) {
+            lastAction = `Researched ${shortlist.map(c => c.sym).join(', ')} — passed`;
+            if (latestLogKind() !== 'CHECK') logAuto(uid, 'CHECK', `Checked — passed after research — ${shortlist.map(c => `${c.sym} (${c.signal})`).join(', ')} flashed and got researched, but the auto trader passed. ${reason}`);
+          }
         }
       }
     }
-  }
-  if (!lastAction) {
-    lastAction = 'Checked — no trade';
-    logCheckDeduped(`Checked — no trade — No position sitting at the ${style.label} ${style.stop}% / +${style.target}% lines and no new ${style.label.toLowerCase()} signal strong enough to research. Still watching.`);
-  }
-  setLA(lastAction);
-  return { ran: true, action: lastAction.startsWith('Bought') ? 'bought' : (lastAction.startsWith('Sold') || lastAction.startsWith('Covered')) ? 'sold' : lastAction.startsWith('Researched') ? 'pass' : 'no-trade' };
+    if (!lastAction) {
+      lastAction = 'Checked — no trade';
+      logCheckDeduped(`Checked — no trade — No position sitting at the ${style.label} ${style.stop}% / +${style.target}% lines and no new ${style.label.toLowerCase()} signal strong enough to research. Still watching.`);
+    }
+    setLA(lastAction);
+    return { ran: true, action: lastAction.startsWith('Bought') ? 'bought' : (lastAction.startsWith('Sold') || lastAction.startsWith('Covered')) ? 'sold' : lastAction.startsWith('Researched') ? 'pass' : 'no-trade' };
+  } finally { autoRunning.delete(uid); }
 }
 
 // H7: the cycle ticks every 30 s (the fastest check step) and each player's
@@ -1130,8 +1148,8 @@ async function serverCycle() {
   try {
     const users = db.prepare('SELECT id FROM users').all();
     if (!users.length) return;
-    maybeLeagueRollover(); // weekly leagues roll over even with the page closed
     const quotes = await fetchLiveQuotes(); // shared live quotes for the whole cycle
+    maybeLeagueRollover(quotes); // weekly leagues roll over even with the page closed — on the fresh quotes, not the stale cache
     const now = Date.now();
     for (const u of users) {
       const s = effectiveSettings(u.id, db.prepare('SELECT * FROM users WHERE id=?').get(u.id));
@@ -1149,6 +1167,7 @@ setInterval(serverCycle, 30 * 1000);
 
 // ---------- Express ----------
 const app = express();
+app.set('trust proxy', 1); // Azure sits behind a proxy — without this req.ip is the proxy's IP for everyone
 app.disable('x-powered-by');
 // M5: security headers on every response (no helmet dependency — plain
 // Express headers). Sessions still live in localStorage on the client
@@ -1158,7 +1177,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
   next();
 });
 app.use(express.json());
@@ -1170,6 +1189,7 @@ const rateBuckets = new Map();
 function rateLimit(req, res, next) {
   const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   const now = Date.now();
+  for (const [k, v] of rateBuckets) if (now > v.resetAt) rateBuckets.delete(k); // prune expired windows so the map never grows unboundedly
   const b = rateBuckets.get(ip) || { count: 0, resetAt: now + RATE_WINDOW_MS };
   if (now > b.resetAt) { b.count = 0; b.resetAt = now + RATE_WINDOW_MS; }
   b.count += 1;
@@ -1243,8 +1263,9 @@ function publicState(uid, opts = {}) {
     return a + (pc != null ? (p.price - pc) * p.shares : 0);
   }, 0);
   const etToday = etDate();
+  const [todayStart, todayEnd] = etDayBounds(etToday.year, etToday.month, etToday.day);
   let todayAdjust = 0;
-  for (const tr of db.prepare('SELECT symbol, side, shares, price, source, created_at FROM trades WHERE user_id=?').all(uid)) {
+  for (const tr of db.prepare('SELECT symbol, side, shares, price, source, created_at FROM trades WHERE user_id=? AND created_at>=? AND created_at<?').all(uid, todayStart, todayEnd)) {
     const d = etDate(new Date(tr.created_at));
     if (d.year !== etToday.year || d.month !== etToday.month || d.day !== etToday.day) continue;
     const pc = prevCloseOf(tr.symbol);
@@ -1278,7 +1299,7 @@ function publicState(uid, opts = {}) {
     user: { id: user.id, name: user.name, email: user.email || '', pendingEmail: user.pending_email || '', emailVerified: !!user.email_verified, isOwner: !!user.is_owner },
     cash: game.cash, bestRun: game.best_run, bestWorth, netWorth, closeNetWorth, closeDiff, allTime, allTimePct, todayChange, todayPct, emailQueued, quotesAsOf, quotesStale,
     positions, customSymbols: boardSymbols(uid).custom, coreTickers: TICKERS,
-    trades: db.prepare('SELECT * FROM trades WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
+    trades: db.prepare('SELECT * FROM trades WHERE user_id=? ORDER BY created_at DESC LIMIT ?').all(uid, Math.max(1, Math.min(500, +opts.tradesLimit || 50))), // ?limit= honoured for trade-card pair lookup (default 50)
     orders: listOrders(uid),
     alerts: db.prepare('SELECT * FROM alerts WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
     autoLog: db.prepare('SELECT * FROM auto_log WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(uid),
@@ -1553,6 +1574,7 @@ app.post('/api/auth/register', rateLimit, async (req, res) => {
   if (String(name).trim().length < 2) return res.status(400).json({ error: 'Pick a name with at least 2 characters.' });
   if (String(name).trim().length > 30) return res.status(400).json({ error: 'Name is too long (max 30 characters)' }); // L5
   if (pin && String(pin).length < 6) return res.status(400).json({ error: 'PIN must be at least 6 characters' }); // H5
+  if (pin && String(pin).length > 64) return res.status(400).json({ error: 'PIN must be at most 64 characters' });
   // Starting cash is chosen at sign-up ($100–$10,000,000, default $100,000).
   // Validate server-side — a bad value is rejected, never silently clamped.
   const scR = (startCash == null || startCash === '') ? { value: START_CASH } : validateStartCash(startCash);
@@ -1593,6 +1615,7 @@ app.post('/api/auth/claim', rateLimit, (req, res) => {
   if (!user) return res.status(404).json({ error: 'No player with that name' });
   if (user.pin_hash) return res.status(400).json({ error: 'That player already has a PIN — sign in instead' });
   if (!pin || String(pin).length < 6) return res.status(400).json({ error: 'PIN must be at least 6 characters' }); // H5
+  if (String(pin).length > 64) return res.status(400).json({ error: 'PIN must be at most 64 characters' });
   // H4: claiming the OWNER account proves ownership — it needs the claim code.
   if (user.is_owner) {
     const chk = ownerClaimOk(req.body?.claimCode);
@@ -1706,12 +1729,14 @@ app.delete('/api/custom-symbols', auth, (req, res) => {
   const symbol = String(req.body?.symbol || '').trim().toUpperCase();
   const pos = db.prepare('SELECT * FROM positions WHERE user_id=? AND symbol=?').get(req.user.id, symbol);
   if (pos) return res.status(400).json({ error: 'Sell your ' + symbol + ' shares first — you still hold ' + pos.shares });
+  const openOrder = db.prepare("SELECT * FROM orders WHERE user_id=? AND symbol=? AND status='open'").get(req.user.id, symbol);
+  if (openOrder) return res.status(400).json({ error: 'Cancel your open ' + symbol + ' order first — you still have an open ' + openOrder.side + ' order for it' });
   db.prepare('DELETE FROM custom_symbols WHERE user_id=? AND symbol=?').run(req.user.id, symbol);
   res.json({ ok: true, state: publicState(req.user.id) });
 });
 
 // Game state + trading
-app.get('/api/state', auth, (req, res) => res.json(publicState(req.user.id)));
+app.get('/api/state', auth, (req, res) => res.json(publicState(req.user.id, { tradesLimit: req.query.limit })));
 // Leaderboard — read-only, authenticated, public numbers only.
 app.get('/api/leaderboard', auth, (req, res) => res.json({ players: leaderboardRows(), you: req.user.name }));
 app.get('/api/leagues', auth, (req, res) => {
@@ -1850,7 +1875,10 @@ app.post('/api/challenges/claim', auth, (req, res) => {
   if (pr.progress < pr.goal) return res.status(400).json({ error: 'Challenge not complete yet — finish it first' });
   const already = db.prepare('SELECT 1 FROM challenge_claims WHERE user_id=? AND date=? AND key=?').get(req.user.id, todayKey, key);
   if (already) return res.status(400).json({ error: 'Already claimed — XP was already awarded for this one' });
-  db.prepare('INSERT INTO challenge_claims(user_id,date,key,xp,created_at) VALUES(?,?,?,?,?)').run(req.user.id, todayKey, key, def.xp, Date.now());
+  // INSERT OR IGNORE: a parallel claim racing this one loses the race
+  // instead of hitting the PK and 500ing — 0 changes means already claimed.
+  const claim = db.prepare('INSERT OR IGNORE INTO challenge_claims(user_id,date,key,xp,created_at) VALUES(?,?,?,?,?)').run(req.user.id, todayKey, key, def.xp, Date.now());
+  if (claim.changes === 0) return res.status(400).json({ error: 'Already claimed — XP was already awarded for this one' });
   const p = getProgress(req.user.id);
   db.prepare('UPDATE user_progress SET xp=? WHERE user_id=?').run((p.xp || 0) + def.xp, req.user.id);
   touchActivity(req.user.id);
@@ -1936,7 +1964,9 @@ app.get('/api/coach', auth, (req, res) => res.json(computeCoach(req.user.id)));
 app.post('/api/trade', auth, async (req, res) => {
   const { symbol, side, shares } = req.body || {};
   if (!boardSymbols(req.user.id).all.includes(symbol) || !['buy', 'sell'].includes(side) || !(shares > 0)) return res.status(400).json({ error: 'Bad trade' });
-  const quotes = effectiveQuotesFor(req.user.id, await fetchLiveQuotes(boardSymbols(req.user.id).all));
+  let quotes;
+  try { quotes = effectiveQuotesFor(req.user.id, await fetchLiveQuotes(boardSymbols(req.user.id).all)); }
+  catch { return res.status(502).json({ error: 'Price feed unavailable, try again shortly' }); }
   const price = quotes[symbol]?.price;
   if (!price) return res.status(502).json({ error: 'Live price unavailable right now' });
   const r = applyTrade(req.user.id, symbol, side, +shares, price, 'manual');
@@ -2016,9 +2046,12 @@ function predictorAiUsedToday(uid) {
   const [start, end] = etDayBounds(d.year, d.month, d.day);
   // Legacy rows (before the ledger existed) counted from predictor_chats so
   // old asks still count toward today's limit; the ledger is authoritative
-  // for everything since. Take the max, never the sum (a legacy ask is also
-  // in the ledger once it was recorded there).
-  const legacy = db.prepare(`SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND (mode IS NULL OR mode='ai') AND created_at>=? AND created_at<? AND NOT EXISTS (SELECT 1 FROM predictor_ai_usage WHERE user_id=? AND ABS(created_at - predictor_chats.created_at) < 2000)`).get(uid, start, end, uid).c;
+  // for everything since. The legacy query excludes chats matched in the
+  // ledger (same user, created within 500 ms), so legacy + ledger is the
+  // true total with no double-counting — the sum is correct, not the max.
+  // It also excludes chats whose outlook came from rules (outlook_source
+  // 'rules'): a failed AI call falls back to rules and must not burn quota.
+  const legacy = db.prepare(`SELECT COUNT(*) c FROM predictor_chats WHERE user_id=? AND (mode IS NULL OR mode='ai') AND (outlook_source IS NULL OR outlook_source='ai') AND created_at>=? AND created_at<? AND NOT EXISTS (SELECT 1 FROM predictor_ai_usage WHERE user_id=? AND ABS(created_at - predictor_chats.created_at) < 500)`).get(uid, start, end, uid).c;
   const ledger = db.prepare('SELECT COUNT(*) c FROM predictor_ai_usage WHERE user_id=? AND created_at>=? AND created_at<?').get(uid, start, end).c;
   return legacy + ledger;
 }
@@ -2040,7 +2073,9 @@ app.post('/api/predictor', auth, async (req, res) => {
   if (mode === 'ai' && !req.user.is_owner && predictorAiUsedToday(req.user.id) >= PREDICTOR_AI_DAILY_LIMIT) {
     return res.status(429).json({ error: 'Daily Predictor limit reached — 2 AI questions a day for standard members. Come back tomorrow. (Rules-only questions are unlimited — switch to Rules only below.)', ...predictorLimitInfo(req.user.id, req.user) });
   }
-  const quotes = effectiveQuotesFor(req.user.id, await fetchLiveQuotes(boardSymbols(req.user.id).all));
+  let quotes;
+  try { quotes = effectiveQuotesFor(req.user.id, await fetchLiveQuotes(boardSymbols(req.user.id).all)); }
+  catch { return res.status(502).json({ error: 'Price feed unavailable, try again shortly' }); }
   const q = quotes[symbol];
   const res2 = await researchPass(symbol, quotes);
   const chg = q ? q.changePct : 0;
@@ -2070,7 +2105,7 @@ app.post('/api/predictor', auth, async (req, res) => {
   const risks = ['After-hours moves can reverse at the open', 'Single-day moves are noisy — watch the -5% stop / +10% target lines'];
   let answer = ai || `${symbol} — ${outlook} (${confidence}% confidence).\n${keyPoints.join('\n')}\nRisks: ${risks.join('; ')}.\nTimeframe: ${timeframe}.\n${mode === 'rules' ? '(Rules-only answer — no AI used, unlimited questions.)' : '(AI research unavailable — no AI_API_KEY configured; answer is rules-based from live price, trend and news.)'}`;
   db.prepare('INSERT INTO predictor_chats(user_id,symbol,question,answer,outlook,confidence,price_at_ask,timeframe,key_points,risks,mode,outlook_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, symbol, question, answer, outlook, confidence, q?.price || 0, timeframe, JSON.stringify(keyPoints), JSON.stringify(risks), mode, outlookSource, Date.now());
-  if (mode === 'ai') db.prepare('INSERT INTO predictor_ai_usage(user_id,created_at) VALUES(?,?)').run(req.user.id, Date.now()); // C4: append-only usage ledger
+  if (mode === 'ai' && ai) db.prepare('INSERT INTO predictor_ai_usage(user_id,created_at) VALUES(?,?)').run(req.user.id, Date.now()); // C4: append-only usage ledger — only when the AI actually answered, never on a rules fallback
   touchActivity(req.user.id); // asking the Predictor counts toward the daily streak
   res.json({ outlook, confidence, outlookSource, answer, timeframe, keyPoints, risks, priceAtAsk: q?.price || 0, predictorMode: mode, ...predictorLimitInfo(req.user.id, req.user), state: publicState(req.user.id) });
 });
@@ -2221,5 +2256,8 @@ app.post('/api/email/test', auth, async (req, res) => {
   const r = await sendEmail(user.email, `${APP_NAME} test email`, `This is a test email from ${APP_NAME}. If you got this, ping and auto-trade emails will reach you.`);
   res.json(r);
 });
+
+app.use((req, res) => res.status(404).json({ error: 'Not found' })); // unknown routes are JSON too, never Express's default HTML 404
+app.use((err, req, res, next) => { console.error('Unhandled error', err); if (res.headersSent) return next(err); res.status(500).json({ error: 'Internal error' }); });
 
 app.listen(PORT, () => console.log(`${APP_NAME} running on http://localhost:${PORT} — Created by Lucas Do`));

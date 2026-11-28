@@ -292,7 +292,7 @@ async function loadState() {
     : 'Extended prices: the price shown is the live extended price from the latest 1-minute bar — after hours it moves against the regular close. When overnight prices are off, your game freezes at the regular close outside market hours instead.';
   renderTradeSessionBanner();
   const fg = $('footer-game');
-  if (fg) fg.textContent = `${money(state.settings.startCash || 100000)} paper cash to start (your amount — change it in Settings), but the prices are now real live quotes for your 12 watchlist tickers — plus any stocks and crypto you add yourself — refreshed every 10 seconds. Paper trading never closes — buy and sell premarket, after hours, whenever, at the last live price. Your guardrails still run the show: positions flag at −5% / +10%, the Pings tab watches those lines for you, the Predictor tab is Verity AI reading the live tape, and the Auto tab hands the whole sim to Verity AI — it buys the signals and sells your lines while you watch. No real money moves, ever.`;
+  if (fg) fg.textContent = `${money(state.settings.startCash || 100000)} paper cash to start (your amount — change it in Settings), but the prices are now real live quotes for your 12 watchlist tickers — plus any stocks and crypto you add yourself — refreshed every 10 seconds. Paper trading never closes — buy and sell premarket, after hours, whenever, at the last live price. Your guardrails still run the show: positions flag at your style's stop and target lines, the Pings tab watches those lines for you, the Predictor tab is Verity AI reading the live tape, and the Auto tab hands the whole sim to Verity AI — it buys the signals and sells your lines while you watch. No real money moves, ever.`;
   $('footer-best-run').textContent = state.bestRun > 0 ? 'BEST BANKED RUN: ' + money(state.bestRun) : '';
   renderPositions(); renderTrades(); renderOrders(); renderAlerts(); renderAutoLog(); renderPredHistory(); renderCustomList(); renderSidebarProfile(); renderSettings(); renderFeedbackInbox(); renderDeleteRow(); fillSymbolSelects(); updateSteppers(); updateAutoUI(); updatePingUI(); updateNotifyState(); applyServerConfigBadges(); updatePredLimit();
   const unread = state.alerts.filter(a => !a.read).length;
@@ -448,7 +448,21 @@ async function loadCoach() {
 // ---------- Shareable trade cards ----------
 // The opening trade for a closed trade: latest earlier trade of the same
 // symbol with the opposite side (a buy for a long sell, a short-open sell
-// for a cover). state.trades is newest-first, limit 50.
+// for a cover). state.trades is newest-first, limit 50 — so for an older
+// close the opener may not be in state.trades at all. fetchOlderTradePair
+// asks /api/state for more history (limit=500); the server honours ?limit=
+// (clamped to 500). If no opener is in reach, tradeCardData falls back to
+// rebuilding the entry from the realised P&L the server already books:
+// long-sell pnl = (exit − entry) × shares, cover pnl = (entry − exit) ×
+// shares — so entry = exit ∓ pnl / shares. That is exact for the
+// position's average cost, which is what the P&L was booked against.
+const olderPairCache = new Map();
+function isOpeningTradeFor(open, t) {
+  if (!open || open.symbol !== t.symbol || !(open.created_at < t.created_at)) return false;
+  if (t.side === 'sell' && !String(t.source || '').endsWith('-short')) return open.side === 'buy' && !String(open.source || '').endsWith('-cover');
+  if (t.side === 'buy' && String(t.source || '').endsWith('-cover')) return open.side === 'sell' && String(open.source || '').endsWith('-short');
+  return false;
+}
 function closedTradePair(t) {
   const idx = (state.trades || []).findIndex(x => x.id === t.id);
   const earlier = (state.trades || []).slice(idx + 1);
@@ -456,16 +470,31 @@ function closedTradePair(t) {
   if (t.side === 'buy' && String(t.source || '').endsWith('-cover')) return earlier.find(x => x.symbol === t.symbol && x.side === 'sell' && String(x.source || '').endsWith('-short'));
   return null;
 }
-function tradeCardData(t) {
-  const open = closedTradePair(t);
-  const entry = open ? open.price : null;
+async function fetchOlderTradePair(t) {
+  if (olderPairCache.has(t.id)) return olderPairCache.get(t.id);
+  let open = null;
+  try {
+    const j = await api('/api/state?limit=500');
+    open = (j.trades || []).find(x => isOpeningTradeFor(x, t)) || null;
+  } catch { /* state fetch failed — tradeCardData falls back to the P&L rebuild below */ }
+  olderPairCache.set(t.id, open);
+  return open;
+}
+function tradeCardData(t, open) {
+  const pair = open === undefined ? closedTradePair(t) : open;
+  let entry = pair ? pair.price : null;
+  if (entry == null && t.pnl != null && t.shares > 0) {
+    // No opener in reach (older than the fetched window): rebuild the
+    // entry from the booked P&L — see the note above closedTradePair.
+    entry = t.side === 'sell' ? t.price - t.pnl / t.shares : t.price + t.pnl / t.shares;
+  }
   const exit = t.price;
   const won = t.pnl > 0;
   const pnlPct = entry ? ((t.side === 'sell' ? (exit - entry) : (entry - exit)) / entry) * 100 : null;
   return { entry, exit, won, pnlPct, verb: t.side === 'sell' ? (String(t.source || '').endsWith('-short') ? 'SHORTED' : 'SOLD') : 'COVERED' };
 }
-function drawTradeCard(t) {
-  const d = tradeCardData(t);
+function drawTradeCard(t, open) {
+  const d = tradeCardData(t, open);
   const cv = document.createElement('canvas'); cv.width = 900; cv.height = 1125;
   const x = cv.getContext('2d');
   const accent = d.won ? '#2bff88' : '#ff4757';
@@ -492,8 +521,9 @@ function drawTradeCard(t) {
   x.fillStyle = '#7d8f83'; x.font = '400 24px "JetBrains Mono", monospace'; x.fillText('Paper trading only — no real money, no real orders.', 56, 1088);
   return cv;
 }
-function shareTradeCard(t) {
-  const cv = drawTradeCard(t);
+async function shareTradeCard(t) {
+  const open = closedTradePair(t) || await fetchOlderTradePair(t);
+  const cv = drawTradeCard(t, open);
   cv.toBlob(b => {
     if (!b) { alert('Could not render the card — try again.'); return; }
     const a = document.createElement('a');
@@ -503,8 +533,9 @@ function shareTradeCard(t) {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }, 'image/png');
 }
-function copyTradeText(t) {
-  const d = tradeCardData(t);
+async function copyTradeText(t) {
+  const open = closedTradePair(t) || await fetchOlderTradePair(t);
+  const d = tradeCardData(t, open);
   const pctTxt = d.pnlPct != null ? ` (${d.pnlPct >= 0 ? '+' : ''}${d.pnlPct.toFixed(1)}%)` : '';
   const verb = d.won ? 'made' : 'lost';
   const invite = state?.discordInviteUrl ? ` Join: ${state.discordInviteUrl}` : '';
@@ -1118,7 +1149,7 @@ async function doTrade() {
         flashTradeCardLoss();
       }
     }
-    state = j.state; await loadState(); await loadQuotes(); loadExtras(true);
+    state = j.state; await refreshAll(); loadExtras(true); // refresh the board the same way the REFRESH button does — cash, shares and trades update with no extra click
   } catch (e) { $('trade-msg').textContent = 'Trade failed: ' + e.message; }
   finally { tradeInFlight = false; if (btn) btn.disabled = false; }
 }
@@ -1143,7 +1174,7 @@ async function placeOrder() {
   if (!(shares > 0)) { $('order-msg').textContent = 'Enter shares first.'; return; }
   try {
     const j = await api('/api/orders', { method: 'POST', body: JSON.stringify({ symbol: $('order-symbol').value, side: orderSide, type: $('order-type').value, targetPrice: target, shares }) });
-    state = j.state; renderOrders(); loadExtras(true);
+    state = j.state; renderOrders(); await refreshAll(); loadExtras(true); // a filled order changes cash/positions/trades too — refresh the board the same way the REFRESH button does
     $('order-msg').textContent = j.filledNow ? 'Order filled immediately at the target price or better.' : 'Order placed — it fills at the target price or better when the live price touches it.';
   } catch (e) { $('order-msg').textContent = 'Order failed: ' + e.message; }
 }
@@ -1180,7 +1211,7 @@ function renderTrades() {
   el.innerHTML = state.trades.map(t => {
     const src = String(t.source || '');
     const kindTag = src.endsWith('-short') ? ' <span class="tag red">SHORT</span>' : src.endsWith('-cover') ? ' <span class="tag amber">COVER</span>' : '';
-    const closed = !!t.pnl && ((t.side === 'sell' && !src.endsWith('-short')) || (t.side === 'buy' && src.endsWith('-cover')));
+    const closed = (t.side === 'sell' && !src.endsWith('-short')) || (t.side === 'buy' && src.endsWith('-cover'));
     return `<div class="trade-row"><span class="chip ${t.side === 'buy' ? 'buy' : 'sell'}">${escapeHtml(String(t.side || '').toUpperCase())}</span>${kindTag} <strong>${escapeHtml(t.symbol)}</strong> · ${t.shares} shares @ ${money(t.price)} · ${money(t.total)} · ${fmtDT(t.created_at)} · ${escapeHtml(t.session || '')} · ${escapeHtml(t.source || '')}${t.pnl ? ` · Realized P&L <span class="${t.pnl >= 0 ? 'up' : 'down'}">${money(t.pnl)}</span>` : ''}${closed ? ` <button class="btn small" data-share-trade="${t.id}">${icon('download')} SHARE PNG</button><button class="btn small" data-copy-trade="${t.id}">${icon('copy')} COPY FOR DISCORD</button>` : ''}</div>`;
   }).join('');
   el.querySelectorAll('[data-share-trade]').forEach(b => b.onclick = () => { const t = (state.trades || []).find(x => x.id === +b.dataset.shareTrade); if (t) shareTradeCard(t); });
@@ -1696,7 +1727,7 @@ async function clearEmail(msgEl) {
 $('btn-clear-email').onclick = () => clearEmail('email-msg');
 $('btn-set-clear-email').onclick = () => clearEmail('set-email-msg');
 // AUTO actions
-async function runNow() { const j = await api('/api/auto/run', { method: 'POST' }); state = j.state; await loadState(); banner('Check ran: ' + (j.action || '')); }
+async function runNow() { try { const j = await api('/api/auto/run', { method: 'POST' }); state = j.state; await loadState(); banner('Check ran: ' + (j.action || '')); } catch (e) { banner('Auto run failed — try again.' + (e.message ? ' (' + e.message + ')' : '')); } }
 $('btn-run-now').onclick = runNow;
 $('btn-set-run-now').onclick = runNow;
 $('btn-clear-auto-log').onclick = async () => { const j = await api('/api/auto-log', { method: 'DELETE' }); state = j.state; await loadState(); banner('Auto log cleared'); };
@@ -1882,21 +1913,29 @@ function applyServerConfigBadges() {
   const el = $('welcome-board'); if (!el) return;
   el.innerHTML = CORE.map(s => `<div><b>${escapeHtml(s)}</b><span>${escapeHtml(NAME_MAP[s])}</span></div>`).join('');
 })();
-// Boot — SECURITY: never auto-sign-in on load/reload. A stored token or
-// cookie must not open the owner account with no PIN. If a token is left
-// over from an earlier session, delete that server session, drop the
-// token, and always ask for name + PIN.
+// Boot — restore a stored session across reloads: the token in
+// localStorage ('verityinvest-token', set at sign-in — never the PIN)
+// is NOT trusted on its own. It is validated against the server first:
+// GET /api/state runs the auth middleware, which checks the token
+// against the sessions table (30-day expiry). Only a token the server
+// still accepts enters the app; an invalid/expired one is dropped and
+// the player lands back on the sign-in screen.
 (async () => {
   applyTheme(localStorage.getItem('verityinvest-theme') || 'terminal');
   renderThemePickers();
   await loadConfig();
   if (!localStorage.getItem('verityinvest-welcomed')) showWelcome(); else $('welcome-screen').classList.add('hidden');
+  let restored = false;
   if (token) {
-    try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}
-    token = ''; localStorage.removeItem('verityinvest-token');
+    try { await api('/api/state'); restored = true; }
+    catch { token = ''; localStorage.removeItem('verityinvest-token'); }
   }
   await loadPlayers();
-  if (localStorage.getItem('verityinvest-welcomed')) showAuth('signin');
+  if (restored) {
+    enterApp();
+    try { await refreshAll(); $('app-loading').classList.add('hidden'); if (state?.user?.name) saveDeviceAccount(state.user.name); }
+    catch { $('app-loading').classList.add('hidden'); $('app-error').classList.remove('hidden'); }
+  } else if (localStorage.getItem('verityinvest-welcomed')) showAuth('signin');
   // PWA: register the service worker (app-shell cache only, never API).
   // Guarded — if registration fails or the browser has no SW support, the
   // app just runs without offline caching.
